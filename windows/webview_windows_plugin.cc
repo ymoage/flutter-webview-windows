@@ -5,9 +5,12 @@
 #include <flutter/standard_method_codec.h>
 #include <windows.h>
 
+#include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "util/string_converter.h"
 #include "webview_bridge.h"
@@ -59,14 +62,33 @@ class WebviewWindowsPlugin : public flutter::Plugin {
   std::unique_ptr<WebviewHost> webview_host_;
   std::unordered_map<int64_t, std::unique_ptr<WebviewBridge>> instances_;
 
+  // design 93 / #24: guard for the async environment creation. While creation
+  // is in flight, later requests must not start a second creation; they are
+  // queued and flushed once the host is ready.
+  bool host_creating_ = false;
+  std::vector<std::function<void(bool success, std::string error)>>
+      pending_host_callbacks_;
+
   WNDCLASS window_class_ = {};
   flutter::TextureRegistrar* textures_;
   flutter::BinaryMessenger* messenger_;
 
   bool InitPlatform();
 
+  // Ensure a WebviewHost exists: invoke callback immediately if present,
+  // otherwise start async creation and invoke callback on completion. While a
+  // creation is in flight, just queue the callback (no second creation).
+  void EnsureHost(std::function<void(bool success, std::string error)> callback);
+  // Start environment creation; on completion flush all pending_host_callbacks_.
+  void StartHostCreation(std::optional<std::wstring> user_data_directory,
+                         std::optional<std::wstring> browser_exe_path,
+                         std::optional<std::string> arguments);
+
   void CreateWebviewInstance(
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>);
+  // Continuation after the host is ready (create hwnd -> CreateWebview).
+  void ContinueCreateWebviewInstance(
+      std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
   // Called when a method is called on this plugin's channel from Dart.
   void HandleMethodCall(
       const flutter::MethodCall<flutter::EncodableValue>& method_call,
@@ -140,13 +162,28 @@ void WebviewWindowsPlugin::HandleMethodCall(
     std::optional<std::string> additional_args =
         GetOptionalValue<std::string>(map, "additionalArguments");
 
-    webview_host_ = std::move(WebviewHost::Create(
-        platform_.get(), user_data_wpath, browser_exe_wpath, additional_args));
-    if (!webview_host_) {
-      return result->Error(kErrorCodeEnvironmentCreationFailed);
+    // design 93 / #24: respond from the environment creation completion
+    // handler instead of blocking (webview_host_ was checked at the top of the
+    // handler, so it is always null here).
+    if (host_creating_) {
+      // A lazy creation with default params may be in flight. To avoid using
+      // the wrong custom arguments, return an error so the caller can retry.
+      return result->Error(kErrorCodeEnvironmentCreationFailed,
+                           "Environment creation is already in progress.");
     }
 
-    return result->Success();
+    std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>
+        shared_result = std::move(result);
+    pending_host_callbacks_.push_back(
+        [shared_result](bool success, std::string error) {
+          if (success) {
+            shared_result->Success();
+          } else {
+            shared_result->Error(kErrorCodeEnvironmentCreationFailed, error);
+          }
+        });
+    StartHostCreation(user_data_wpath, browser_exe_wpath, additional_args);
+    return;
   }
 
   if (method_call.method_name().compare(kMethodGetWebViewVersion) == 0) {
@@ -179,6 +216,49 @@ void WebviewWindowsPlugin::HandleMethodCall(
   }
 }
 
+void WebviewWindowsPlugin::EnsureHost(
+    std::function<void(bool success, std::string error)> callback) {
+  if (webview_host_) {
+    callback(true, "");
+    return;
+  }
+  pending_host_callbacks_.push_back(std::move(callback));
+  // If a creation is in flight, just queue (no second creation); it will be
+  // flushed on completion.
+  if (!host_creating_) {
+    StartHostCreation(platform_->GetDefaultDataDirectory(), std::nullopt,
+                      std::nullopt);
+  }
+}
+
+void WebviewWindowsPlugin::StartHostCreation(
+    std::optional<std::wstring> user_data_directory,
+    std::optional<std::wstring> browser_exe_path,
+    std::optional<std::string> arguments) {
+  host_creating_ = true;
+  WebviewHost::CreateAsync(
+      platform_.get(),
+      [this](std::unique_ptr<WebviewHost> host,
+             std::unique_ptr<WebviewCreationError> error) {
+        // This completion handler is delivered via the calling (UI) thread's
+        // message loop.
+        host_creating_ = false;
+        std::string err;
+        if (host) {
+          webview_host_ = std::move(host);
+        } else {
+          err = error ? error->message : "Environment creation failed.";
+        }
+        const bool ok = (webview_host_ != nullptr);
+        auto callbacks = std::move(pending_host_callbacks_);
+        pending_host_callbacks_.clear();
+        for (auto& cb : callbacks) {
+          cb(ok, err);
+        }
+      },
+      user_data_directory, browser_exe_path, arguments);
+}
+
 void WebviewWindowsPlugin::CreateWebviewInstance(
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
   if (!InitPlatform()) {
@@ -186,20 +266,25 @@ void WebviewWindowsPlugin::CreateWebviewInstance(
                          "The platform is not supported");
   }
 
-  if (!webview_host_) {
-    webview_host_ = std::move(WebviewHost::Create(
-        platform_.get(), platform_->GetDefaultDataDirectory()));
-    if (!webview_host_) {
-      return result->Error(kErrorCodeEnvironmentCreationFailed);
+  std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>
+      shared_result = std::move(result);
+  // design 93 / #24: do not block on environment creation; run the rest after
+  // the host is ready.
+  EnsureHost([this, shared_result](bool success, std::string error) {
+    if (!success) {
+      return shared_result->Error(kErrorCodeEnvironmentCreationFailed, error);
     }
-  }
+    ContinueCreateWebviewInstance(shared_result);
+  });
+}
 
+void WebviewWindowsPlugin::ContinueCreateWebviewInstance(
+    std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>
+        shared_result) {
   auto hwnd =
       CreateWindowEx(0, window_class_.lpszClassName, L"", 0, 0, 0, 0, 0,
                      HWND_MESSAGE, nullptr, window_class_.hInstance, nullptr);
 
-  std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>
-      shared_result = std::move(result);
   webview_host_->CreateWebview(
       hwnd, true, true,
       [shared_result, this](std::unique_ptr<Webview> webview,

@@ -35,9 +35,20 @@ class WebviewHost {
   typedef std::function<void(wil::com_ptr<ICoreWebView2PointerInfo>,
                              std::unique_ptr<WebviewCreationError>)>
       PointerInfoCreationCallback;
+  typedef std::function<void(std::unique_ptr<WebviewHost>,
+                             std::unique_ptr<WebviewCreationError>)>
+      HostCreationCallback;
 
-  static std::unique_ptr<WebviewHost> Create(
-      WebviewPlatform* platform,
+  // ISSUES #24 / design 93: create the environment asynchronously.
+  //
+  // The old `Create` waited for CreateCoreWebView2EnvironmentWithOptions (an
+  // async API) by blocking the calling thread on a future/promise. WebView2
+  // delivers the completion handler through the calling thread's message loop,
+  // so blocking that thread means the callback never arrives -> deadlock
+  // (surfaced with WebView2 Runtime 151). Here the completion handler builds
+  // the WebviewHost and passes it to [callback] (same style as CreateWebview).
+  static void CreateAsync(
+      WebviewPlatform* platform, HostCreationCallback callback,
       std::optional<std::wstring> user_data_directory = std::nullopt,
       std::optional<std::wstring> browser_exe_path = std::nullopt,
       std::optional<std::string> arguments = std::nullopt);

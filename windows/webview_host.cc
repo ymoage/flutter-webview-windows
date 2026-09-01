@@ -2,7 +2,6 @@
 
 #include <wrl.h>
 
-#include <future>
 #include <iostream>
 
 #include "util/rohelper.h"
@@ -10,8 +9,9 @@
 using namespace Microsoft::WRL;
 
 // static
-std::unique_ptr<WebviewHost> WebviewHost::Create(
-    WebviewPlatform* platform, std::optional<std::wstring> user_data_directory,
+void WebviewHost::CreateAsync(
+    WebviewPlatform* platform, HostCreationCallback callback,
+    std::optional<std::wstring> user_data_directory,
     std::optional<std::wstring> browser_exe_path,
     std::optional<std::string> arguments) {
   wil::com_ptr<CoreWebView2EnvironmentOptions> opts;
@@ -21,32 +21,42 @@ std::unique_ptr<WebviewHost> WebviewHost::Create(
     opts->put_AdditionalBrowserArguments(warguments.c_str());
   }
 
-  std::promise<HRESULT> result_promise;
-  wil::com_ptr<ICoreWebView2Environment> env;
-  auto result = CreateCoreWebView2EnvironmentWithOptions(
+  auto hr = CreateCoreWebView2EnvironmentWithOptions(
       browser_exe_path.has_value() ? browser_exe_path->c_str() : nullptr,
-      user_data_directory.has_value() ? user_data_directory->c_str() : nullptr, opts.get(),
+      user_data_directory.has_value() ? user_data_directory->c_str() : nullptr,
+      opts.get(),
       Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
-          [&promise = result_promise, &ptr = env](
-              HRESULT r, ICoreWebView2Environment* env) -> HRESULT {
-            promise.set_value(r);
-            ptr.swap(env);
+          [platform, callback](HRESULT r,
+                               ICoreWebView2Environment* env) -> HRESULT {
+            if ((SUCCEEDED(r) || r == RPC_E_CHANGED_MODE) && env) {
+              wil::com_ptr<ICoreWebView2Environment> env_ptr(env);
+              auto webview_env3 = env_ptr.try_query<ICoreWebView2Environment3>();
+              if (webview_env3) {
+                callback(std::unique_ptr<WebviewHost>(new WebviewHost(
+                             platform, std::move(webview_env3))),
+                         nullptr);
+                return S_OK;
+              }
+              callback(nullptr,
+                       WebviewCreationError::create(
+                           r, "ICoreWebView2Environment3 is not available."));
+              return S_OK;
+            }
+            callback(nullptr,
+                     WebviewCreationError::create(
+                         r,
+                         "CreateCoreWebView2EnvironmentWithOptions completion "
+                         "handler reported failure."));
             return S_OK;
           })
           .Get());
 
-  if (SUCCEEDED(result)) {
-    result = result_promise.get_future().get();
-    if ((SUCCEEDED(result) || result == RPC_E_CHANGED_MODE) && env) {
-      auto webview_env3 = env.try_query<ICoreWebView2Environment3>();
-      if (webview_env3) {
-        return std::unique_ptr<WebviewHost>(
-            new WebviewHost(platform, std::move(webview_env3)));
-      }
-    }
+  // If the call itself fails synchronously the completion handler never runs.
+  if (FAILED(hr)) {
+    callback(nullptr,
+             WebviewCreationError::create(
+                 hr, "CreateCoreWebView2EnvironmentWithOptions failed."));
   }
-
-  return {};
 }
 
 WebviewHost::WebviewHost(WebviewPlatform* platform,
