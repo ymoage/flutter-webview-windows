@@ -285,4 +285,10 @@ class Webview {
   void UnregisterEventHandlers();
   void EnableSecurityUpdates();
   void SendScroll(double offset, bool horizontal);
+
+  // ISSUES #16 / design 11.8 (C2): add WS_EX_TRANSPARENT to the Chromium
+  // top-level window (Chrome_WidgetWin_1) that steals clicks near the screen
+  // origin while a video panel is shown. Makes it click-through (hit-test only)
+  // while keeping it visible/rendering. Idempotent.
+  void ApplyInputTransparency();
 };

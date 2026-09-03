@@ -14,6 +14,9 @@ void WebviewHost::CreateAsync(
     std::optional<std::wstring> user_data_directory,
     std::optional<std::wstring> browser_exe_path,
     std::optional<std::string> arguments) {
+  // TEMP markers (design 96 / #24): pinpoint hang location. Not throttled.
+  std::cerr << "[WebView2] CreateAsync: enter" << std::endl;
+  OutputDebugStringA("[WebView2] CreateAsync: enter\n");
   wil::com_ptr<CoreWebView2EnvironmentOptions> opts;
   if (arguments.has_value()) {
     opts = Microsoft::WRL::Make<CoreWebView2EnvironmentOptions>();
@@ -28,6 +31,8 @@ void WebviewHost::CreateAsync(
       Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
           [platform, callback](HRESULT r,
                                ICoreWebView2Environment* env) -> HRESULT {
+            std::cerr << "[WebView2] CreateAsync: completion handler enter" << std::endl;
+            OutputDebugStringA("[WebView2] CreateAsync: completion handler enter\n");
             if ((SUCCEEDED(r) || r == RPC_E_CHANGED_MODE) && env) {
               wil::com_ptr<ICoreWebView2Environment> env_ptr(env);
               auto webview_env3 = env_ptr.try_query<ICoreWebView2Environment3>();
@@ -96,6 +101,8 @@ void WebviewHost::CreateWebViewPointerInfo(PointerInfoCreationCallback callback)
 
 void WebviewHost::CreateWebViewCompositionController(
     HWND hwnd, CompositionControllerCreationCallback callback) {
+  std::cerr << "[WebView2] CreateWebViewCompositionController: enter" << std::endl;
+  OutputDebugStringA("[WebView2] CreateWebViewCompositionController: enter\n");
   auto hr = webview_env_->CreateCoreWebView2CompositionController(
       hwnd,
       Callback<
@@ -103,6 +110,8 @@ void WebviewHost::CreateWebViewCompositionController(
           [callback](HRESULT hr,
                      ICoreWebView2CompositionController* compositionController)
               -> HRESULT {
+            std::cerr << "[WebView2] CompositionController: completion handler enter" << std::endl;
+            OutputDebugStringA("[WebView2] CompositionController: completion handler enter\n");
             if (SUCCEEDED(hr)) {
               callback(
                   std::move(wil::com_ptr<ICoreWebView2CompositionController>(

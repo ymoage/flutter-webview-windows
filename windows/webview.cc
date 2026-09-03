@@ -87,6 +87,74 @@ Webview::Webview(
   RegisterEventHandlers();
 
   is_valid_ = CreateSurface(host->compositor(), hwnd, offscreen_only);
+
+  // ISSUES #16 / design 11.8 (C2): apply once right after creation. If the
+  // Chromium windows are not created yet at this point, NavigationCompleted
+  // re-applies (idempotent).
+  ApplyInputTransparency();
+
+  // TEMP marker (design 96 / #24): pinpoint where a hang occurs. Not throttled.
+  std::cerr << "[WebView2] Webview() constructor completed" << std::endl;
+  OutputDebugStringA("[WebView2] Webview() constructor completed\n");
+}
+
+namespace {
+
+// Context passed to the EnumWindows callback.
+struct InputTransparencyContext {
+  DWORD target_pid;
+};
+
+// Adds WS_EX_TRANSPARENT (idempotently) to top-level windows matching all of
+// the 11.8 C2 conditions. EnumWindows enumerates top-level windows only, so
+// condition (1) "top-level" holds implicitly.
+BOOL CALLBACK ApplyInputTransparencyProc(HWND hwnd, LPARAM lparam) {
+  auto* ctx = reinterpret_cast<InputTransparencyContext*>(lparam);
+
+  // Condition (2): the window belongs to this webview's browser process
+  // (never touch webviews of other apps / other environments).
+  DWORD pid = 0;
+  GetWindowThreadProcessId(hwnd, &pid);
+  if (pid != ctx->target_pid) {
+    return TRUE;
+  }
+
+  // Condition (1): class name has the "Chrome_WidgetWin_" prefix.
+  wchar_t class_name[256] = {0};
+  if (GetClassNameW(hwnd, class_name, ARRAYSIZE(class_name)) == 0) {
+    return TRUE;
+  }
+  if (wcsncmp(class_name, L"Chrome_WidgetWin_", 17) != 0) {
+    return TRUE;
+  }
+
+  // Condition (3): exstyle has TOOLWINDOW|NOACTIVATE. This excludes interactive
+  // Chromium windows such as DevTools (those are normal windows without these).
+  const LONG_PTR exstyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+  if ((exstyle & WS_EX_TOOLWINDOW) == 0 || (exstyle & WS_EX_NOACTIVATE) == 0) {
+    return TRUE;
+  }
+
+  // Idempotent: do nothing if already transparent.
+  if ((exstyle & WS_EX_TRANSPARENT) == 0) {
+    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, exstyle | WS_EX_TRANSPARENT);
+  }
+  return TRUE;
+}
+
+}  // namespace
+
+void Webview::ApplyInputTransparency() {
+  if (!webview_) {
+    return;
+  }
+  UINT32 browser_pid = 0;
+  if (FAILED(webview_->get_BrowserProcessId(&browser_pid)) ||
+      browser_pid == 0) {
+    return;
+  }
+  InputTransparencyContext ctx{static_cast<DWORD>(browser_pid)};
+  EnumWindows(ApplyInputTransparencyProc, reinterpret_cast<LPARAM>(&ctx));
 }
 
 Webview::~Webview() {
@@ -235,6 +303,11 @@ void Webview::RegisterEventHandlers() {
               loading_state_changed_callback_(
                   WebviewLoadingState::NavigationCompleted);
             }
+
+            // ISSUES #16 / design 11.8 (C2): re-apply on navigation completed
+            // (covers Chromium windows missed right after creation, panel
+            // reopen, etc). Idempotent.
+            ApplyInputTransparency();
 
             return S_OK;
           })
@@ -705,9 +778,14 @@ void Webview::SetScrollDelta(double delta_x, double delta_y) {
 }
 
 void Webview::LoadUrl(const std::string& url) {
+  // TEMP markers (design 96 / #24): Navigate() enter/return. Not throttled.
+  std::cerr << "[WebView2] LoadUrl: Navigate() enter" << std::endl;
+  OutputDebugStringA("[WebView2] LoadUrl: Navigate() enter\n");
   if (IsValid()) {
     webview_->Navigate(util::Utf16FromUtf8(url).c_str());
   }
+  std::cerr << "[WebView2] LoadUrl: Navigate() returned" << std::endl;
+  OutputDebugStringA("[WebView2] LoadUrl: Navigate() returned\n");
 }
 
 void Webview::LoadStringContent(const std::string& content) {
