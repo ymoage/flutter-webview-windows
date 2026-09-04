@@ -768,11 +768,35 @@ class _WebviewState extends State<Webview> {
 
   void _reportSurfaceSize() async {
     final box = _key.currentContext?.findRenderObject() as RenderBox?;
-    if (box != null) {
-      await _controller.ready;
-      unawaited(_controller._setSize(
-          box.size, widget.scaleFactor ?? window.devicePixelRatio));
+    if (box == null) {
+      return;
     }
+
+    await _controller.ready;
+
+    // Pyokomin fork (ISSUES #28): several [Webview] widgets can be bound to the
+    // same controller. The host rebuilds a widget from the shared controller on
+    // every rebuild and keeps that controller alive across reparenting, so a
+    // widget that has just been detached can still resume here after the await.
+    //
+    // Its render object holds the size it had while detached (or a transient
+    // layout value), and because it reports last it overwrites the size pushed
+    // by the widget that is actually on screen. The WebView2 visual then shrinks
+    // to a narrow viewport while the panel stays large: YouTube switches to its
+    // mobile layout and the small texture is stretched over the whole panel.
+    //
+    // Only a mounted, attached, laid-out widget may report its size.
+    if (!mounted || !box.attached || !box.hasSize) {
+      return;
+    }
+
+    final size = box.size;
+    if (size.isEmpty) {
+      return;
+    }
+
+    unawaited(_controller._setSize(
+        size, widget.scaleFactor ?? window.devicePixelRatio));
   }
 
   @override

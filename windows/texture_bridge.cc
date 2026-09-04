@@ -56,6 +56,7 @@ bool TextureBridge::Start() {
           kPixelFormat),
       kNumBuffers, size);
   assert(frame_pool_);
+  pool_size_ = size;
 
   frame_pool_->add_FrameArrived(
       Microsoft::WRL::Callback<ABI::Windows::Foundation::ITypedEventHandler<
@@ -124,15 +125,30 @@ void TextureBridge::OnFrameArrived() {
     }
   }
 
-  if (needs_update_) {
-    ABI::Windows::Graphics::SizeInt32 size;
-    capture_item_->get_Size(&size);
+  // ISSUES #28: reconcile the frame pool with the capture item every frame.
+  // put_Bounds() does not guarantee the visual has resized yet, so a size read
+  // taken right after a resize can be stale. Recreating once on a flag would
+  // latch that stale size until the next resize, leaving a small pool stretched
+  // over a larger panel (huge, scrollbar-ridden page). Comparing every frame
+  // means we simply retry until the sizes agree.
+  ABI::Windows::Graphics::SizeInt32 item_size = {0, 0};
+  if (SUCCEEDED(capture_item_->get_Size(&item_size)) &&
+      (item_size.Width != pool_size_.Width ||
+       item_size.Height != pool_size_.Height)) {
     frame_pool_->Recreate(
         graphics_context_->device(),
         static_cast<ABI::Windows::Graphics::DirectX::DirectXPixelFormat>(
             kPixelFormat),
-        kNumBuffers, size);
-    needs_update_ = false;
+        kNumBuffers, item_size);
+    if (log_next_pool_resize_) {
+      log_next_pool_resize_ = false;
+      char buf[128];
+      sprintf_s(buf, "FramePool: resized %dx%d -> %dx%d\n", pool_size_.Width,
+                pool_size_.Height, item_size.Width, item_size.Height);
+      std::cerr << buf;
+      OutputDebugStringA(buf);
+    }
+    pool_size_ = item_size;
   }
 
   if (has_frame) {
@@ -238,7 +254,10 @@ bool TextureBridge::ShouldDropFrame() {
 
 void TextureBridge::NotifySurfaceSizeChanged() {
   const std::lock_guard<std::mutex> lock(mutex_);
-  needs_update_ = true;
+  // ISSUES #28: the pool is reconciled per frame against the capture item, so
+  // no flag is needed to drive the resize. This only arms one diagnostic line
+  // per reported resize, which keeps the log from repeating every frame.
+  log_next_pool_resize_ = true;
 }
 
 void TextureBridge::SetFpsLimit(std::optional<int> max_fps) {

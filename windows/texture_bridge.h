@@ -72,7 +72,13 @@ class TextureBridge {
 
   FrameAvailableCallback frame_available_;
   SurfaceSizeChangedCallback surface_size_changed_;
-  std::atomic<bool> needs_update_ = false;
+  // ISSUES #28: size of the capture frame pool currently in use. The pool is
+  // reconciled every frame against capture_item_->get_Size(); a one-shot flag
+  // could latch a stale size read taken before the visual actually resized and
+  // never retry, leaving the page stretched.
+  ABI::Windows::Graphics::SizeInt32 pool_size_ = {0, 0};
+  // ISSUES #28: arms a single diagnostic log for the next pool resize.
+  bool log_next_pool_resize_ = false;
   winrt::com_ptr<ID3D11Texture2D> last_frame_;
   std::optional<std::chrono::high_resolution_clock::time_point>
       last_frame_timestamp_;
