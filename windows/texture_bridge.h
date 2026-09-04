@@ -8,6 +8,7 @@
 #include <functional>
 #include <mutex>
 #include <optional>
+#include <vector>
 
 #include "graphics_context.h"
 
@@ -41,6 +42,28 @@ class TextureBridge {
   void SetFpsLimit(std::optional<int> max_fps);
 
  protected:
+  // ISSUES #26 / design 98: frame pipeline statistics. Aggregated and printed
+  // once every 5 seconds; per-frame logging is deliberately avoided because it
+  // would itself introduce jitter into the very thing being measured.
+  void RecordArrived();
+  void RecordMarked();
+  void RecordPresented(double copy_ms);
+  void MaybeReportStats();
+
+  struct FrameStats {
+    uint64_t arrived = 0;
+    uint64_t marked = 0;
+    uint64_t presented = 0;
+    std::vector<double> intervals_ms;  // between accepted arrivals
+    double copy_total_ms = 0.0;
+    double copy_max_ms = 0.0;
+    uint64_t copy_count = 0;
+    std::optional<std::chrono::high_resolution_clock::time_point> last_arrival;
+    std::chrono::high_resolution_clock::time_point window_start =
+        std::chrono::high_resolution_clock::now();
+  };
+  FrameStats stats_;
+
   bool is_running_ = false;
 
   const GraphicsContext* graphics_context_;

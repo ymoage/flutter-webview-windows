@@ -1,5 +1,7 @@
 #include "texture_bridge_gpu.h"
 
+#include <chrono>
+
 #include <iostream>
 
 #include "util/direct3d11.interop.h"
@@ -25,8 +27,15 @@ void TextureBridgeGpu::ProcessFrame(
 
   auto device_context = graphics_context_->d3d_device_context();
 
+  // ISSUES #26 / design 98: measure the per-frame GPU copy + flush cost.
+  const auto copy_start = std::chrono::high_resolution_clock::now();
   device_context->CopyResource(surface_.get(), src_texture.get());
   device_context->Flush();
+  const auto copy_ms = std::chrono::duration<double, std::milli>(
+                           std::chrono::high_resolution_clock::now() -
+                           copy_start)
+                           .count();
+  RecordPresented(copy_ms);
 }
 
 void TextureBridgeGpu::EnsureSurface(uint32_t width, uint32_t height) {

@@ -135,9 +135,86 @@ void TextureBridge::OnFrameArrived() {
     needs_update_ = false;
   }
 
+  if (has_frame) {
+    RecordArrived();
+  }
+
   if (has_frame && frame_available_) {
     frame_available_();
+    RecordMarked();
   }
+
+  MaybeReportStats();
+}
+
+// ISSUES #26 / design 98: frame pipeline statistics.
+void TextureBridge::RecordArrived() {
+  stats_.arrived++;
+  const auto now = std::chrono::high_resolution_clock::now();
+  if (stats_.last_arrival.has_value()) {
+    const auto d = std::chrono::duration<double, std::milli>(
+                       now - stats_.last_arrival.value())
+                       .count();
+    stats_.intervals_ms.push_back(d);
+  }
+  stats_.last_arrival = now;
+}
+
+void TextureBridge::RecordMarked() { stats_.marked++; }
+
+void TextureBridge::RecordPresented(double copy_ms) {
+  stats_.presented++;
+  stats_.copy_total_ms += copy_ms;
+  stats_.copy_count++;
+  if (copy_ms > stats_.copy_max_ms) {
+    stats_.copy_max_ms = copy_ms;
+  }
+}
+
+void TextureBridge::MaybeReportStats() {
+  const auto now = std::chrono::high_resolution_clock::now();
+  const auto elapsed =
+      std::chrono::duration_cast<std::chrono::seconds>(now - stats_.window_start)
+          .count();
+  if (elapsed < 5) {
+    return;
+  }
+
+  double avg = 0.0, p95 = 0.0, max = 0.0;
+  if (!stats_.intervals_ms.empty()) {
+    auto v = stats_.intervals_ms;  // copy for sorting
+    double sum = 0.0;
+    for (const auto x : v) {
+      sum += x;
+      if (x > max) max = x;
+    }
+    avg = sum / v.size();
+    std::sort(v.begin(), v.end());
+    const size_t idx =
+        static_cast<size_t>(v.size() * 0.95);
+    p95 = v[idx >= v.size() ? v.size() - 1 : idx];
+  }
+
+  const double copy_avg =
+      stats_.copy_count ? (stats_.copy_total_ms / stats_.copy_count) : 0.0;
+
+  char buf[320];
+  sprintf_s(buf,
+            "FrameStats: %llds arrived=%llu marked=%llu presented=%llu "
+            "interval(avg=%.1f p95=%.1f max=%.1f) copy(avg=%.2f max=%.2f)\n",
+            static_cast<long long>(elapsed),
+            static_cast<unsigned long long>(stats_.arrived),
+            static_cast<unsigned long long>(stats_.marked),
+            static_cast<unsigned long long>(stats_.presented), avg, p95, max,
+            copy_avg, stats_.copy_max_ms);
+  std::cerr << buf;
+  OutputDebugStringA(buf);
+
+  // Reset the window (keep last_arrival so the interval series stays continuous)
+  const auto keep = stats_.last_arrival;
+  stats_ = FrameStats{};
+  stats_.last_arrival = keep;
+  stats_.window_start = now;
 }
 
 bool TextureBridge::ShouldDropFrame() {
