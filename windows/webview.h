@@ -104,6 +104,9 @@ struct EventRegistrations {
   EventRegistrationToken download_starting_token_{};
   EventRegistrationToken download_bytes_received_token_{};
   EventRegistrationToken download_state_changed_token_{};
+  // ISSUES #88 / instruction 162: WebView2 child process crashes were never
+  // observed, so the app kept showing the last texture frame forever.
+  EventRegistrationToken process_failed_token_{};
 };
 
 class Webview {
@@ -114,6 +117,10 @@ class Webview {
   typedef std::function<void(WebviewLoadingState)> LoadingStateChangedCallback;
   typedef std::function<void(COREWEBVIEW2_WEB_ERROR_STATUS)>
       OnLoadErrorCallback;
+  // ISSUES #88 / instruction 162: a WebView2 helper process died. Without this
+  // the embedder gets no notification and the view freezes on the last frame.
+  typedef std::function<void(COREWEBVIEW2_PROCESS_FAILED_KIND)>
+      ProcessFailedCallback;
   typedef std::function<void(WebviewHistoryChanged)> HistoryChangedCallback;
   typedef std::function<void(const std::string&)> DevtoolsProtocolEventCallback;
   typedef std::function<void(const std::string&)> DocumentTitleChangedCallback;
@@ -191,6 +198,10 @@ class Webview {
     on_load_error_callback_ = std::move(callback);
   }
 
+  void OnProcessFailed(ProcessFailedCallback callback) {
+    process_failed_callback_ = std::move(callback);
+  }
+
   void OnLoadingStateChanged(LoadingStateChangedCallback callback) {
     loading_state_changed_callback_ = std::move(callback);
   }
@@ -263,6 +274,7 @@ class Webview {
   LoadingStateChangedCallback loading_state_changed_callback_;
   DownloadEventCallback download_event_callback_;
   OnLoadErrorCallback on_load_error_callback_;
+  ProcessFailedCallback process_failed_callback_;
   HistoryChangedCallback history_changed_callback_;
   DocumentTitleChangedCallback document_title_changed_callback_;
   SurfaceSizeChangedCallback surface_size_changed_callback_;

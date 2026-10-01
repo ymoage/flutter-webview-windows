@@ -249,6 +249,19 @@ void WebviewBridge::RegisterEventHandlers() {
     EmitEvent(event);
   });
 
+  // ISSUES #88 / instruction 162: a helper process died. The value is the
+  // COREWEBVIEW2_PROCESS_FAILED_KIND so the Dart side can tell a renderer or
+  // GPU crash (reload is enough) from the browser process exiting (recreate).
+  webview_->OnProcessFailed([this](COREWEBVIEW2_PROCESS_FAILED_KIND kind) {
+    const auto event = flutter::EncodableValue(flutter::EncodableMap{
+        {flutter::EncodableValue(kEventType),
+         flutter::EncodableValue("onProcessFailed")},
+        {flutter::EncodableValue(kEventValue),
+         flutter::EncodableValue(static_cast<int>(kind))},
+    });
+    EmitEvent(event);
+  });
+
   webview_->OnLoadingStateChanged([this](WebviewLoadingState state) {
     const auto event = flutter::EncodableValue(flutter::EncodableMap{
         {flutter::EncodableValue(kEventType),

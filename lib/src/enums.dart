@@ -70,3 +70,60 @@ enum WebErrorStatus {
   WebErrorStatusValidAuthenticationCredentialsRequired,
   WebErrorStatusValidProxyAuthenticationRequired,
 }
+
+/// Why a WebView2 helper process died (ISSUES #88 / instruction 162).
+///
+/// Mirrors COREWEBVIEW2_PROCESS_FAILED_KIND, but only to the depth the caller
+/// needs: can the view be brought back with a reload, or does the whole
+/// instance have to be recreated?
+enum WebviewProcessFailedKind {
+  /// The browser process is gone. The instance is unusable; recreate it.
+  browserProcessExited,
+
+  /// The renderer died. A reload brings the page back.
+  renderProcessExited,
+
+  /// The renderer stopped responding. A reload brings the page back.
+  renderProcessUnresponsive,
+
+  /// A helper process such as the GPU process died. A reload is enough.
+  helperProcessExited,
+
+  /// Something the mapping does not know about. Treated as "reload" because
+  /// that is the cheaper recovery; if it is not enough the caller gives up
+  /// after one attempt anyway.
+  unknown,
+}
+
+/// Maps the native COREWEBVIEW2_PROCESS_FAILED_KIND value.
+///
+/// The numeric values follow the WebView2 SDK:
+///   0 browser process exited
+///   1 render process exited
+///   2 render process unresponsive
+///   3 frame render process exited
+///   4 utility process exited
+///   5 sandbox helper process exited
+///   6 GPU process exited
+///   7 PPAPI plugin process exited
+///   8 PPAPI broker process exited
+///   9 unknown process exited
+WebviewProcessFailedKind webviewProcessFailedKindFromCode(int code) {
+  switch (code) {
+    case 0:
+      return WebviewProcessFailedKind.browserProcessExited;
+    case 1:
+    case 3:
+      return WebviewProcessFailedKind.renderProcessExited;
+    case 2:
+      return WebviewProcessFailedKind.renderProcessUnresponsive;
+    case 4:
+    case 5:
+    case 6:
+    case 7:
+    case 8:
+      return WebviewProcessFailedKind.helperProcessExited;
+    default:
+      return WebviewProcessFailedKind.unknown;
+  }
+}

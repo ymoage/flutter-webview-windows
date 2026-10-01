@@ -287,6 +287,30 @@ void Webview::RegisterEventHandlers() {
           .Get(),
       &event_registrations_.content_loading_token_);
 
+  // ISSUES #88 / instruction 162: subscribe to ProcessFailed.
+  //
+  // When a WebView2 helper process (renderer / GPU) dies, the host keeps the
+  // last composited frame on screen and nothing tells the embedder. From the
+  // user's side the panel simply freezes, and F5 brings it back - which matches
+  // the reported symptom. Forward the kind so the Dart side can decide between
+  // reloading and recreating the instance.
+  webview_->add_ProcessFailed(
+      Callback<ICoreWebView2ProcessFailedEventHandler>(
+          [this](ICoreWebView2* sender,
+                 ICoreWebView2ProcessFailedEventArgs* args) -> HRESULT {
+            COREWEBVIEW2_PROCESS_FAILED_KIND kind =
+                COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED;
+            if (args) {
+              args->get_ProcessFailedKind(&kind);
+            }
+            if (process_failed_callback_) {
+              process_failed_callback_(kind);
+            }
+            return S_OK;
+          })
+          .Get(),
+      &event_registrations_.process_failed_token_);
+
   webview_->add_NavigationCompleted(
       Callback<ICoreWebView2NavigationCompletedEventHandler>(
           [this](ICoreWebView2* sender,

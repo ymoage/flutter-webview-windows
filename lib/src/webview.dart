@@ -142,6 +142,18 @@ class WebviewController extends ValueNotifier<WebviewValue> {
   /// A stream reflecting the navigation error when navigation completed with an error.
   Stream<WebErrorStatus> get onLoadError => _onLoadErrorStreamController.stream;
 
+  final StreamController<WebviewProcessFailedKind>
+      _onProcessFailedStreamController =
+      StreamController<WebviewProcessFailedKind>.broadcast();
+
+  /// A WebView2 helper process died (ISSUES #88 / instruction 162).
+  ///
+  /// Without this the embedder gets no notification: the last composited frame
+  /// stays on screen and the panel looks frozen. Listeners decide whether a
+  /// reload is enough or the instance has to be recreated.
+  Stream<WebviewProcessFailedKind> get onProcessFailed =>
+      _onProcessFailedStreamController.stream;
+
   final StreamController<HistoryChanged> _historyChangedStreamController =
       StreamController<HistoryChanged>();
 
@@ -206,6 +218,10 @@ class WebviewController extends ValueNotifier<WebviewValue> {
           case 'onLoadError':
             final value = WebErrorStatus.values[map['value']];
             _onLoadErrorStreamController.add(value);
+            break;
+          case 'onProcessFailed':
+            _onProcessFailedStreamController
+                .add(webviewProcessFailedKindFromCode(map['value'] as int));
             break;
           case 'loadingStateChanged':
             final value = LoadingState.values[map['value']];
@@ -645,9 +661,15 @@ class _WebviewState extends State<Webview> {
 
   StreamSubscription? _cursorSubscription;
 
+  // TEMP (design 107 / ISSUES #28): identify which State instance reports a
+  // size, so we can tell whether the last (small) report comes from a widget
+  // that is about to be disposed.
+  String get _tag => 'ws#${identityHashCode(this)}';
+
   @override
   void initState() {
     super.initState();
+    debugPrint('WebviewLife: $_tag initState');
 
     // TODO: Refactor callback and event handling and
     // remove this line
@@ -664,6 +686,18 @@ class _WebviewState extends State<Webview> {
   }
 
   @override
+  void activate() {
+    debugPrint('WebviewLife: $_tag activate');
+    super.activate();
+  }
+
+  @override
+  void deactivate() {
+    debugPrint('WebviewLife: $_tag deactivate');
+    super.deactivate();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return (widget.height != null && widget.width != null)
         ? SizedBox(
@@ -677,6 +711,7 @@ class _WebviewState extends State<Webview> {
   Widget _buildInner() {
     return NotificationListener<SizeChangedLayoutNotification>(
         onNotification: (notification) {
+          debugPrint('WebviewLife: $_tag SizeChangedLayoutNotification');
           _reportSurfaceSize();
           return true;
         },
@@ -786,6 +821,13 @@ class _WebviewState extends State<Webview> {
     // mobile layout and the small texture is stretched over the whole panel.
     //
     // Only a mounted, attached, laid-out widget may report its size.
+    // TEMP (design 107 / ISSUES #28): who reports what, and in what state.
+    final hasBox = box.attached && box.hasSize;
+    debugPrint('WebviewSize: $_tag report '
+        'mounted=$mounted attached=${box.attached} hasSize=${box.hasSize} '
+        'size=${hasBox ? "${box.size.width.toStringAsFixed(1)}x"
+            "${box.size.height.toStringAsFixed(1)}" : "-"}');
+
     if (!mounted || !box.attached || !box.hasSize) {
       return;
     }
@@ -801,6 +843,7 @@ class _WebviewState extends State<Webview> {
 
   @override
   void dispose() {
+    debugPrint('WebviewLife: $_tag dispose');
     super.dispose();
     _cursorSubscription?.cancel();
   }
