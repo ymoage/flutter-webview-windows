@@ -211,13 +211,28 @@ WebviewBridge::~WebviewBridge() {
   }
 
   // 3. Clear method channel handler
-  method_channel_->SetMethodCallHandler(nullptr);
+  //
+  // Pyokomin #194: only while the engine is alive.
+  //
+  // During engine shutdown the messenger is already dead, and this call
+  // crashes inside FlutterDesktopMessengerSetCallback (0xc0000005).
+  // It happened on *every* exit once a stream had been opened; the minidump
+  // showed flutter_windows.dll+0x14b1d called from this plugin.
+  // Skipping it is safe there: the whole engine (and every handler it owns)
+  // is going away anyway.
+  if (engine_alive_) {
+    method_channel_->SetMethodCallHandler(nullptr);
+  }
 
   // 4. Clear event sink
   event_sink_ = nullptr;
 
   // 5. Unregister texture
-  texture_registrar_->UnregisterTexture(texture_id_);
+  //
+  // Same reasoning as above: the texture registrar belongs to the engine.
+  if (engine_alive_) {
+    texture_registrar_->UnregisterTexture(texture_id_);
+  }
 
   // 6. Explicitly destroy texture_bridge_ first (before webview_)
   texture_bridge_.reset();

@@ -123,6 +123,22 @@ WebviewWindowsPlugin::WebviewWindowsPlugin(flutter::TextureRegistrar* textures,
 }
 
 WebviewWindowsPlugin::~WebviewWindowsPlugin() {
+  // Pyokomin #194: the plugin is destroyed *during* engine shutdown, so the
+  // messenger and the texture registrar are already dead here.
+  //
+  // Tell every bridge about it before destroying them, otherwise their
+  // destructors call back into the engine and crash
+  // (FlutterDesktopMessengerSetCallback -> access violation on every exit).
+  //
+  // The normal dispose path (Dart calls "dispose") erases a single instance
+  // while the engine is alive and is unaffected: the flag stays true there,
+  // so handlers and textures are still released properly.
+  for (auto& [texture_id, bridge] : instances_) {
+    if (bridge) {
+      bridge->MarkEngineGone();
+    }
+  }
+
   instances_.clear();
   UnregisterClass(window_class_.lpszClassName, nullptr);
 }

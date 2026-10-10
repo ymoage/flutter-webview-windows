@@ -19,6 +19,19 @@ class WebviewBridge {
                 std::unique_ptr<Webview> webview);
   ~WebviewBridge();
 
+  // Pyokomin #194: tell this bridge that the Flutter engine is already gone.
+  //
+  // The destructor normally talks back to the engine (clearing the method
+  // call handler and unregistering the texture). That is correct while the
+  // engine is alive, but during engine shutdown the messenger is already
+  // dead and those calls crash inside
+  // FlutterDesktopMessengerSetCallback (access violation, every exit).
+  //
+  // Note that the engine's own C++ wrapper guards the *send* path with
+  // FlutterDesktopMessengerIsAvailable() but does NOT guard the path that
+  // clears a handler, so the plugin has to avoid calling it.
+  void MarkEngineGone() { engine_alive_ = false; }
+
   TextureBridge* texture_bridge() const { return texture_bridge_.get(); }
 
   int64_t texture_id() const { return texture_id_; }
@@ -35,6 +48,9 @@ class WebviewBridge {
 
   flutter::TextureRegistrar* texture_registrar_;
   int64_t texture_id_;
+
+  // Pyokomin #194: false once the engine is shutting down. See MarkEngineGone().
+  bool engine_alive_ = true;
 
   void HandleMethodCall(
       const flutter::MethodCall<flutter::EncodableValue>& method_call,
