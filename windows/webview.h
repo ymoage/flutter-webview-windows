@@ -170,6 +170,11 @@ class Webview {
                      ScriptExecutedCallback callback);
   bool PostWebMessage(const std::string& json);
   bool ClearCookies();
+  // Reads cookies via DevTools Network.getCookies and returns the raw JSON
+  // result (Pyokomin: hand the WebView sign-in to the scraper, ADR-0039).
+  // The values are never logged at this layer.
+  void GetCookies(const std::string& params_json,
+                  ScriptExecutedCallback callback);
   bool ClearCache();
   bool SetCacheDisabled(bool disabled);
   void SetPopupWindowPolicy(WebviewPopupWindowPolicy policy);

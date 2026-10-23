@@ -436,6 +436,21 @@ class WebviewController extends ValueNotifier<WebviewValue> {
     return _methodChannel.invokeMethod('setUserAgent', userAgent);
   }
 
+  /// Reads the cookies for [urls] through DevTools `Network.getCookies` and
+  /// returns the raw JSON result (`{"cookies":[...]}`).
+  ///
+  /// Pyokomin（ADR-0039）: アプリの WebView のログインをスクレイパーへ渡すための口。
+  /// **値はこの層で記録しない**。
+  Future<String?> getCookiesJson(List<String> urls) async {
+    if (_isDisposed) {
+      return null;
+    }
+    assert(value.isInitialized);
+    final data = await _methodChannel.invokeMethod<String>(
+        'getCookies', jsonEncode({'urls': urls}));
+    return data;
+  }
+
   /// Clears browser cookies.
   Future<void> clearCookies() async {
     if (_isDisposed) {

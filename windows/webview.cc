@@ -594,6 +594,25 @@ bool Webview::ClearCookies() {
                                               L"{}", nullptr) == S_OK;
 }
 
+void Webview::GetCookies(const std::string& params_json,
+                         ScriptExecutedCallback callback) {
+  if (IsValid()) {
+    if (SUCCEEDED(webview_->CallDevToolsProtocolMethod(
+            L"Network.getCookies", util::Utf16FromUtf8(params_json).c_str(),
+            Callback<ICoreWebView2CallDevToolsProtocolMethodCompletedHandler>(
+                [callback](HRESULT result, LPCWSTR json_result) {
+                  callback(SUCCEEDED(result),
+                           util::Utf8FromUtf16(json_result));
+                  return S_OK;
+                })
+                .Get()))) {
+      return;
+    }
+  }
+
+  callback(false, std::string());
+}
+
 bool Webview::ClearCache() {
   if (!IsValid()) {
     return false;
