@@ -43,6 +43,8 @@ constexpr auto kMethodSetCacheDisabled = "setCacheDisabled";
 constexpr auto kMethodSetPopupWindowPolicy = "setPopupWindowPolicy";
 constexpr auto kMethodSetFpsLimit = "setFpsLimit";
 constexpr auto kMethodSetMuted = "setMuted";
+// Pyokomin (link screenshot, ADR-0052): JPEG bytes of what is shown now.
+constexpr auto kMethodCapturePreview = "capturePreview";
 
 constexpr auto kEventType = "type";
 constexpr auto kEventValue = "value";
@@ -784,6 +786,20 @@ void WebviewBridge::HandleMethodCall(
       return result->Error(kMethodFailed, "Setting muted state failed.");
     }
     return result->Error(kErrorInvalidArgs);
+  }
+
+  if (method_name.compare(kMethodCapturePreview) == 0) {
+    std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>
+        shared_result = std::move(result);
+    webview_->CapturePreview(
+        [shared_result](bool ok, std::vector<uint8_t> jpeg) {
+          if (!ok) {
+            return shared_result->Error(kMethodFailed,
+                                        "Capturing the preview failed.");
+          }
+          shared_result->Success(flutter::EncodableValue(std::move(jpeg)));
+        });
+    return;
   }
 
   result->NotImplemented();

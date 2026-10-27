@@ -53,8 +53,11 @@ class WebviewHost {
       std::optional<std::wstring> browser_exe_path = std::nullopt,
       std::optional<std::string> arguments = std::nullopt);
 
+  // [profile] (Pyokomin, ADR-0052): create the webview in its own profile
+  // instead of the default one. Needs ICoreWebView2Environment10.
   void CreateWebview(HWND hwnd, bool offscreen_only, bool owns_window,
-                     WebviewCreationCallback callback);
+                     WebviewCreationCallback callback,
+                     std::optional<WebviewProfileOptions> profile = std::nullopt);
 
   void CreateWebViewPointerInfo(PointerInfoCreationCallback cb);
 
@@ -70,5 +73,6 @@ class WebviewHost {
   WebviewHost(WebviewPlatform* platform,
               wil::com_ptr<ICoreWebView2Environment3> webview_env);
   void CreateWebViewCompositionController(
-      HWND hwnd, CompositionControllerCreationCallback cb);
+      HWND hwnd, std::optional<WebviewProfileOptions> profile,
+      CompositionControllerCreationCallback cb);
 };

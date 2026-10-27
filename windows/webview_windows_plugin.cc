@@ -84,11 +84,15 @@ class WebviewWindowsPlugin : public flutter::Plugin {
                          std::optional<std::wstring> browser_exe_path,
                          std::optional<std::string> arguments);
 
+  // [profile] / [locked_down] (Pyokomin, ADR-0052): optional arguments of
+  // "initialize" (profileName, inPrivate, lockedDown). Absent = as before.
   void CreateWebviewInstance(
-      std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>);
+      std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>,
+      std::optional<WebviewProfileOptions> profile, bool locked_down);
   // Continuation after the host is ready (create hwnd -> CreateWebview).
   void ContinueCreateWebviewInstance(
-      std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
+      std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>> result,
+      std::optional<WebviewProfileOptions> profile, bool locked_down);
   // Called when a method is called on this plugin's channel from Dart.
   void HandleMethodCall(
       const flutter::MethodCall<flutter::EncodableValue>& method_call,
@@ -215,7 +219,19 @@ void WebviewWindowsPlugin::HandleMethodCall(
   }
 
   if (method_call.method_name().compare(kMethodInitialize) == 0) {
-    return CreateWebviewInstance(std::move(result));
+    std::optional<WebviewProfileOptions> profile = std::nullopt;
+    bool locked_down = false;
+    if (const auto map =
+            std::get_if<flutter::EncodableMap>(method_call.arguments())) {
+      const auto profile_name = GetOptionalValue<std::string>(*map, "profileName");
+      if (profile_name && !profile_name->empty()) {
+        profile = WebviewProfileOptions{
+            util::Utf16FromUtf8(*profile_name),
+            GetOptionalValue<bool>(*map, "inPrivate").value_or(false)};
+      }
+      locked_down = GetOptionalValue<bool>(*map, "lockedDown").value_or(false);
+    }
+    return CreateWebviewInstance(std::move(result), profile, locked_down);
   }
 
   if (method_call.method_name().compare(kMethodDispose) == 0) {
@@ -276,7 +292,8 @@ void WebviewWindowsPlugin::StartHostCreation(
 }
 
 void WebviewWindowsPlugin::CreateWebviewInstance(
-    std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+    std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result,
+    std::optional<WebviewProfileOptions> profile, bool locked_down) {
   if (!InitPlatform()) {
     return result->Error(kErrorUnsupportedPlatform,
                          "The platform is not supported");
@@ -286,25 +303,28 @@ void WebviewWindowsPlugin::CreateWebviewInstance(
       shared_result = std::move(result);
   // design 93 / #24: do not block on environment creation; run the rest after
   // the host is ready.
-  EnsureHost([this, shared_result](bool success, std::string error) {
+  EnsureHost([this, shared_result, profile, locked_down](bool success,
+                                                         std::string error) {
     if (!success) {
       return shared_result->Error(kErrorCodeEnvironmentCreationFailed, error);
     }
-    ContinueCreateWebviewInstance(shared_result);
+    ContinueCreateWebviewInstance(shared_result, profile, locked_down);
   });
 }
 
 void WebviewWindowsPlugin::ContinueCreateWebviewInstance(
     std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>
-        shared_result) {
+        shared_result,
+    std::optional<WebviewProfileOptions> profile, bool locked_down) {
   auto hwnd =
       CreateWindowEx(0, window_class_.lpszClassName, L"", 0, 0, 0, 0, 0,
                      HWND_MESSAGE, nullptr, window_class_.hInstance, nullptr);
 
   webview_host_->CreateWebview(
       hwnd, true, true,
-      [shared_result, this](std::unique_ptr<Webview> webview,
-                            std::unique_ptr<WebviewCreationError> error) {
+      [shared_result, this, locked_down](
+          std::unique_ptr<Webview> webview,
+          std::unique_ptr<WebviewCreationError> error) {
         if (!webview) {
           if (error) {
             return shared_result->Error(
@@ -315,6 +335,11 @@ void WebviewWindowsPlugin::ContinueCreateWebviewInstance(
           }
           return shared_result->Error(kErrorCodeWebviewCreationFailed,
                                       "Creating the webview failed.");
+        }
+
+        // Pyokomin (ADR-0052): lock down before any page is loaded.
+        if (locked_down) {
+          webview->LockDown();
         }
 
         auto bridge = std::make_unique<WebviewBridge>(
@@ -329,7 +354,8 @@ void WebviewWindowsPlugin::ContinueCreateWebviewInstance(
         });
 
         shared_result->Success(response);
-      });
+      },
+      profile);
 }
 
 bool WebviewWindowsPlugin::InitPlatform() {

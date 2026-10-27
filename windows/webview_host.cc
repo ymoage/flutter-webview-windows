@@ -72,9 +72,10 @@ WebviewHost::WebviewHost(WebviewPlatform* platform,
 
 void WebviewHost::CreateWebview(HWND hwnd, bool offscreen_only,
                                 bool owns_window,
-                                WebviewCreationCallback callback) {
+                                WebviewCreationCallback callback,
+                                std::optional<WebviewProfileOptions> profile) {
   CreateWebViewCompositionController(
-      hwnd, [=, self = this](
+      hwnd, profile, [=, self = this](
                 wil::com_ptr<ICoreWebView2CompositionController> controller,
                 std::unique_ptr<WebviewCreationError> error) {
         if (controller) {
@@ -100,12 +101,11 @@ void WebviewHost::CreateWebViewPointerInfo(PointerInfoCreationCallback callback)
 }
 
 void WebviewHost::CreateWebViewCompositionController(
-    HWND hwnd, CompositionControllerCreationCallback callback) {
+    HWND hwnd, std::optional<WebviewProfileOptions> profile,
+    CompositionControllerCreationCallback callback) {
   std::cerr << "[WebView2] CreateWebViewCompositionController: enter" << std::endl;
   OutputDebugStringA("[WebView2] CreateWebViewCompositionController: enter\n");
-  auto hr = webview_env_->CreateCoreWebView2CompositionController(
-      hwnd,
-      Callback<
+  auto handler = Callback<
           ICoreWebView2CreateCoreWebView2CompositionControllerCompletedHandler>(
           [callback](HRESULT hr,
                      ICoreWebView2CompositionController* compositionController)
@@ -125,8 +125,29 @@ void WebviewHost::CreateWebViewCompositionController(
             }
 
             return S_OK;
-          })
-          .Get());
+          });
+
+  HRESULT hr;
+  if (profile.has_value()) {
+    // Pyokomin (ADR-0052): its own profile (and InPrivate if asked), so the
+    // page sees none of the cookies of the default profile.
+    auto env10 = webview_env_.try_query<ICoreWebView2Environment10>();
+    wil::com_ptr<ICoreWebView2ControllerOptions> options;
+    if (!env10 ||
+        FAILED(env10->CreateCoreWebView2ControllerOptions(options.put()))) {
+      callback(nullptr, WebviewCreationError::create(
+                            E_NOINTERFACE,
+                            "ICoreWebView2Environment10 is not available."));
+      return;
+    }
+    options->put_ProfileName(profile->name.c_str());
+    options->put_IsInPrivateModeEnabled(profile->in_private ? TRUE : FALSE);
+    hr = env10->CreateCoreWebView2CompositionControllerWithOptions(
+        hwnd, options.get(), handler.Get());
+  } else {
+    hr = webview_env_->CreateCoreWebView2CompositionController(hwnd,
+                                                               handler.Get());
+  }
 
   if (FAILED(hr)) {
     callback(nullptr,

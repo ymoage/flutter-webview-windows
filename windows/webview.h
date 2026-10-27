@@ -6,7 +6,10 @@
 #include <windows.ui.composition.h>
 #include <winrt/base.h>
 
+#include <cstdint>
 #include <functional>
+#include <string>
+#include <vector>
 
 class WebviewHost;
 
@@ -37,6 +40,14 @@ enum class WebviewPermissionState { Default, Allow, Deny };
 enum class WebviewPopupWindowPolicy { Allow, Deny, ShowInSameWindow };
 
 enum class WebviewHostResourceAccessKind { Deny, Allow, DenyCors };
+
+// Pyokomin (link screenshot, ADR-0052): create the webview in its own profile
+// (ICoreWebView2ControllerOptions). With in_private set, the profile keeps no
+// cookies, sign-in state or history, and is gone when the webview is closed.
+struct WebviewProfileOptions {
+  std::wstring name;
+  bool in_private = false;
+};
 
 struct WebviewHistoryChanged {
   BOOL can_go_back;
@@ -178,6 +189,18 @@ class Webview {
   bool ClearCache();
   bool SetCacheDisabled(bool disabled);
   void SetPopupWindowPolicy(WebviewPopupWindowPolicy policy);
+
+  // Pyokomin (link screenshot, ADR-0052): a webview that only loads a page to
+  // take a picture of it. Mutes audio, denies new windows, cancels downloads,
+  // turns off script dialogs and denies every permission request. Cannot be
+  // undone (create a new webview instead).
+  void LockDown();
+
+  // Pyokomin (link screenshot, ADR-0052): JPEG of what is currently shown
+  // (ICoreWebView2::CapturePreview). ok is false when capturing failed.
+  typedef std::function<void(bool ok, std::vector<uint8_t> jpeg)>
+      CapturePreviewCallback;
+  void CapturePreview(CapturePreviewCallback callback);
   bool SetUserAgent(const std::string& user_agent);
   bool OpenDevTools();
   bool SetBackgroundColor(int32_t color);
@@ -267,6 +290,8 @@ class Webview {
   VirtualKeyState virtual_keys_;
   WebviewPopupWindowPolicy popup_window_policy_ =
       WebviewPopupWindowPolicy::Allow;
+  // Set by LockDown(). Checked by the permission and download handlers.
+  bool locked_down_ = false;
 
   winrt::com_ptr<ABI::Windows::UI::Composition::IVisual> surface_;
   winrt::com_ptr<ABI::Windows::UI::Composition::Desktop::IDesktopWindowTarget>

@@ -439,6 +439,11 @@ void Webview::RegisterEventHandlers() {
       Callback<ICoreWebView2PermissionRequestedEventHandler>(
           [this](ICoreWebView2* sender,
                  ICoreWebView2PermissionRequestedEventArgs* args) -> HRESULT {
+            // Pyokomin (ADR-0052): a locked-down webview denies everything.
+            if (locked_down_) {
+              args->put_State(COREWEBVIEW2_PERMISSION_STATE_DENY);
+              return S_OK;
+            }
             if (!permission_requested_callback_) {
               return S_OK;
             }
@@ -509,6 +514,12 @@ void Webview::RegisterEventHandlers() {
         Callback<ICoreWebView2DownloadStartingEventHandler>(
             [this](ICoreWebView2* sender,
                    ICoreWebView2DownloadStartingEventArgs* args) -> HRESULT {
+              // Pyokomin (ADR-0052): a locked-down webview never downloads.
+              if (locked_down_) {
+                args->put_Cancel(TRUE);
+                args->put_Handled(TRUE);
+                return S_OK;
+              }
               wil::com_ptr<ICoreWebView2Deferral> deferral;
               args->GetDeferral(&deferral);
 
@@ -632,7 +643,74 @@ bool Webview::SetCacheDisabled(bool disabled) {
 }
 
 void Webview::SetPopupWindowPolicy(WebviewPopupWindowPolicy policy) {
+  // Pyokomin (ADR-0052): a locked-down webview keeps denying new windows.
+  if (locked_down_) {
+    return;
+  }
   popup_window_policy_ = policy;
+}
+
+void Webview::LockDown() {
+  locked_down_ = true;
+  popup_window_policy_ = WebviewPopupWindowPolicy::Deny;
+  if (!IsValid()) {
+    return;
+  }
+  wil::com_ptr<ICoreWebView2Settings> settings;
+  if (SUCCEEDED(webview_->get_Settings(settings.put()))) {
+    // With default dialogs off and no ScriptDialogOpening handler, alert /
+    // confirm / prompt return right away without showing anything.
+    settings->put_AreDefaultScriptDialogsEnabled(FALSE);
+    settings->put_AreDevToolsEnabled(FALSE);
+  }
+  auto webview8 = webview_.try_query<ICoreWebView2_8>();
+  if (webview8) {
+    webview8->put_IsMuted(TRUE);
+  }
+}
+
+void Webview::CapturePreview(CapturePreviewCallback callback) {
+  if (!IsValid()) {
+    callback(false, {});
+    return;
+  }
+  wil::com_ptr<IStream> stream;
+  if (FAILED(CreateStreamOnHGlobal(nullptr, TRUE, stream.put()))) {
+    callback(false, {});
+    return;
+  }
+  auto hr = webview_->CapturePreview(
+      COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_JPEG, stream.get(),
+      Callback<ICoreWebView2CapturePreviewCompletedHandler>(
+          [stream, callback](HRESULT result) -> HRESULT {
+            if (FAILED(result)) {
+              callback(false, {});
+              return S_OK;
+            }
+            STATSTG stat = {};
+            LARGE_INTEGER zero = {};
+            if (FAILED(stream->Stat(&stat, STATFLAG_NONAME)) ||
+                FAILED(stream->Seek(zero, STREAM_SEEK_SET, nullptr))) {
+              callback(false, {});
+              return S_OK;
+            }
+            std::vector<uint8_t> bytes(
+                static_cast<size_t>(stat.cbSize.QuadPart));
+            ULONG read = 0;
+            if (!bytes.empty() &&
+                FAILED(stream->Read(bytes.data(),
+                                    static_cast<ULONG>(bytes.size()), &read))) {
+              callback(false, {});
+              return S_OK;
+            }
+            bytes.resize(read);
+            callback(true, std::move(bytes));
+            return S_OK;
+          })
+          .Get());
+  if (FAILED(hr)) {
+    callback(false, {});
+  }
 }
 
 bool Webview::SetUserAgent(const std::string& user_agent) {

@@ -196,14 +196,30 @@ class WebviewController extends ValueNotifier<WebviewValue> {
   WebviewController() : super(WebviewValue.uninitialized());
 
   /// Initializes the underlying platform view.
-  Future<void> initialize() async {
+  ///
+  /// Pyokomin (link screenshot, ADR-0052):
+  /// - [profileName]: create the webview in its own WebView2 profile instead
+  ///   of the default one. With [inPrivate], that profile keeps no cookies,
+  ///   sign-in state or history.
+  /// - [lockedDown]: mute audio, deny new windows, cancel downloads, turn off
+  ///   script dialogs and deny every permission request. Cannot be undone.
+  Future<void> initialize({
+    String? profileName,
+    bool inPrivate = false,
+    bool lockedDown = false,
+  }) async {
     if (_isDisposed) {
       return Future<void>.value();
     }
     _creatingCompleter = Completer<void>();
     try {
-      final reply =
-          await _pluginChannel.invokeMapMethod<String, dynamic>('initialize');
+      final options = <String, dynamic>{
+        if (profileName != null) 'profileName': profileName,
+        if (inPrivate) 'inPrivate': true,
+        if (lockedDown) 'lockedDown': true,
+      };
+      final reply = await _pluginChannel.invokeMapMethod<String, dynamic>(
+          'initialize', options.isEmpty ? null : options);
 
       _textureId = reply!['textureId'];
       _methodChannel = MethodChannel('$_pluginChannelPrefix/$_textureId');
@@ -548,6 +564,16 @@ class WebviewController extends ValueNotifier<WebviewValue> {
     return _methodChannel.invokeMethod('setMuted', muted);
   }
 
+  /// JPEG of what is currently shown (ICoreWebView2::CapturePreview).
+  /// Pyokomin (link screenshot, ADR-0052). Returns null when disposed.
+  Future<Uint8List?> capturePreview() async {
+    if (_isDisposed) {
+      return null;
+    }
+    assert(value.isInitialized);
+    return _methodChannel.invokeMethod<Uint8List>('capturePreview');
+  }
+
   /// Adds a Virtual Host Name Mapping.
   ///
   /// Please refer to
@@ -623,6 +649,10 @@ class WebviewController extends ValueNotifier<WebviewValue> {
     assert(value.isInitialized);
     return _methodChannel.invokeMethod('setScrollDelta', [dx, dy]);
   }
+
+  /// Sets the surface size of a webview that is not placed in a widget
+  /// (Pyokomin, link screenshot, ADR-0052: a hidden 1280x720 page).
+  Future<void> setOffscreenSize(Size size) => _setSize(size, 1.0);
 
   /// Sets the surface size to the provided [size].
   Future<void> _setSize(Size size, double scaleFactor) async {
