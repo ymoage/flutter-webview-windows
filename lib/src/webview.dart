@@ -78,13 +78,6 @@ class WebviewValue {
 
 /// Controls a WebView and provides streams for various change events.
 class WebviewController extends ValueNotifier<WebviewValue> {
-  /// Pyokomin fork (ISSUES #298, measurement only): called whenever a [Webview]
-  /// widget forwards a mouse button down/up/cancel to its controller, with the
-  /// logical position, the scale factor used for the physical position and the
-  /// position last sent by setCursorPos (logical). Null in production.
-  static void Function(WebviewController controller, String event,
-      Offset logical, double scale, Offset? lastCursor)? debugPointerObserver;
-
   /// Explicitly initializes the underlying WebView environment
   /// using  an optional [browserExePath], an optional [userDataPath]
   /// and optional Chromium command line arguments [additionalArguments].
@@ -705,16 +698,6 @@ class _WebviewState extends State<Webview> {
   final GlobalKey _key = GlobalKey();
   final _downButtons = <int, PointerButton>{};
 
-  /// Pyokomin fork (ISSUES #298): last position sent by setCursorPos (logical).
-  Offset? _lastCursor;
-
-  void _tracePointer(String event, Offset logical) {
-    final observer = WebviewController.debugPointerObserver;
-    if (observer == null) return;
-    observer(_controller, event, logical,
-        widget.scaleFactor ?? window.devicePixelRatio, _lastCursor);
-  }
-
   PointerDeviceKind _pointerKind = PointerDeviceKind.unknown;
 
   MouseCursor _cursor = SystemMouseCursors.basic;
@@ -787,7 +770,6 @@ class _WebviewState extends State<Webview> {
                         // Ignoring hover events on touch for now
                         return;
                       }
-                      _lastCursor = ev.localPosition;
                       _controller._setCursorPos(ev.localPosition);
                     },
                     onPointerDown: (ev) {
@@ -803,7 +785,6 @@ class _WebviewState extends State<Webview> {
                       }
                       final button = getButton(ev.buttons);
                       _downButtons[ev.pointer] = button;
-                      _tracePointer('down', ev.localPosition);
                       _controller._setPointerButtonState(button, true);
                     },
                     onPointerUp: (ev) {
@@ -818,14 +799,12 @@ class _WebviewState extends State<Webview> {
                         return;
                       }
                       final button = _downButtons.remove(ev.pointer);
-                      _tracePointer(button != null ? 'up' : 'up-unpaired', ev.localPosition);
                       if (button != null) {
                         _controller._setPointerButtonState(button, false);
                       }
                     },
                     onPointerCancel: (ev) {
                       _pointerKind = ev.kind;
-                      _tracePointer('cancel', ev.localPosition);
                       final button = _downButtons.remove(ev.pointer);
                       if (button != null) {
                         _controller._setPointerButtonState(button, false);
@@ -841,7 +820,6 @@ class _WebviewState extends State<Webview> {
                             ev.size,
                             ev.pressure);
                       } else {
-                        _lastCursor = ev.localPosition;
                         _controller._setCursorPos(ev.localPosition);
                       }
                     },
