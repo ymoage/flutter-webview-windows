@@ -61,6 +61,10 @@ class WebviewHost {
 
   void CreateWebViewPointerInfo(PointerInfoCreationCallback cb);
 
+  // Pyokomin (ADR-0063): the child-window webview is created in the same
+  // environment, so it shares the profile and the sign-in.
+  ICoreWebView2Environment* environment() const { return webview_env_.get(); }
+
   winrt::com_ptr<ABI::Windows::UI::Composition::ICompositor> compositor()
       const {
     return compositor_;

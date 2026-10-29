@@ -12,6 +12,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "child_webview.h"
 #include "util/string_converter.h"
 #include "webview_bridge.h"
 #include "webview_host.h"
@@ -26,6 +27,10 @@ constexpr auto kMethodInitialize = "initialize";
 constexpr auto kMethodDispose = "dispose";
 constexpr auto kMethodInitializeEnvironment = "initializeEnvironment";
 constexpr auto kMethodGetWebViewVersion = "getWebViewVersion";
+// Pyokomin (ADR-0063): the child-window webview (one per app).
+constexpr auto kMethodChildCreate = "childWebviewCreate";
+constexpr auto kMethodChildSetVisible = "childWebviewSetVisible";
+constexpr auto kMethodChildDispose = "childWebviewDispose";
 
 constexpr auto kErrorCodeInvalidId = "invalid_id";
 constexpr auto kErrorCodeEnvironmentCreationFailed =
@@ -34,6 +39,9 @@ constexpr auto kErrorCodeEnvironmentAlreadyInitialized =
     "environment_already_initialized";
 constexpr auto kErrorCodeWebviewCreationFailed = "webview_creation_failed";
 constexpr auto kErrorUnsupportedPlatform = "unsupported_platform";
+constexpr auto kErrorCodeChildExists = "child_webview_exists";
+constexpr auto kErrorCodeChildMissing = "child_webview_missing";
+constexpr auto kErrorCodeChildCreationFailed = "child_webview_creation_failed";
 
 template <typename T>
 std::optional<T> GetOptionalValue(const flutter::EncodableMap& map,
@@ -52,7 +60,8 @@ class WebviewWindowsPlugin : public flutter::Plugin {
  public:
   static void RegisterWithRegistrar(flutter::PluginRegistrarWindows* registrar);
 
-  WebviewWindowsPlugin(flutter::TextureRegistrar* textures,
+  WebviewWindowsPlugin(flutter::PluginRegistrarWindows* registrar,
+                       flutter::TextureRegistrar* textures,
                        flutter::BinaryMessenger* messenger);
 
   virtual ~WebviewWindowsPlugin();
@@ -68,6 +77,20 @@ class WebviewWindowsPlugin : public flutter::Plugin {
   bool host_creating_ = false;
   std::vector<std::function<void(bool success, std::string error)>>
       pending_host_callbacks_;
+
+  // Pyokomin (ADR-0063): the child-window webview and its window proc
+  // delegate on the top-level window (-1 = not registered).
+  flutter::PluginRegistrarWindows* registrar_;
+  std::shared_ptr<ChildWebview> child_;
+  int child_proc_id_ = -1;
+  // Set to false in the destructor. Completion handlers that outlive the
+  // plugin must not answer Dart (the engine is gone, #194).
+  std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
+
+  void CreateChildWebview(
+      const flutter::EncodableMap& args,
+      std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
+  void DisposeChildWebview();
 
   WNDCLASS window_class_ = {};
   flutter::TextureRegistrar* textures_;
@@ -108,7 +131,7 @@ void WebviewWindowsPlugin::RegisterWithRegistrar(
           &flutter::StandardMethodCodec::GetInstance());
 
   auto plugin = std::make_unique<WebviewWindowsPlugin>(
-      registrar->texture_registrar(), registrar->messenger());
+      registrar, registrar->texture_registrar(), registrar->messenger());
 
   channel->SetMethodCallHandler(
       [plugin_pointer = plugin.get()](const auto& call, auto result) {
@@ -118,9 +141,10 @@ void WebviewWindowsPlugin::RegisterWithRegistrar(
   registrar->AddPlugin(std::move(plugin));
 }
 
-WebviewWindowsPlugin::WebviewWindowsPlugin(flutter::TextureRegistrar* textures,
-                                           flutter::BinaryMessenger* messenger)
-    : textures_(textures), messenger_(messenger) {
+WebviewWindowsPlugin::WebviewWindowsPlugin(
+    flutter::PluginRegistrarWindows* registrar,
+    flutter::TextureRegistrar* textures, flutter::BinaryMessenger* messenger)
+    : registrar_(registrar), textures_(textures), messenger_(messenger) {
   window_class_.lpszClassName = L"FlutterWebviewMessage";
   window_class_.lpfnWndProc = &DefWindowProc;
   RegisterClass(&window_class_);
@@ -137,6 +161,14 @@ WebviewWindowsPlugin::~WebviewWindowsPlugin() {
   // The normal dispose path (Dart calls "dispose") erases a single instance
   // while the engine is alive and is unaffected: the flag stays true there,
   // so handlers and textures are still released properly.
+  *alive_ = false;
+  // Pyokomin (ADR-0063): close the child-window webview without touching the
+  // registrar (the window proc delegate goes away with the registrar).
+  if (child_) {
+    child_->Close();
+    child_ = nullptr;
+  }
+
   for (auto& [texture_id, bridge] : instances_) {
     if (bridge) {
       bridge->MarkEngineGone();
@@ -232,6 +264,28 @@ void WebviewWindowsPlugin::HandleMethodCall(
       locked_down = GetOptionalValue<bool>(*map, "lockedDown").value_or(false);
     }
     return CreateWebviewInstance(std::move(result), profile, locked_down);
+  }
+
+  if (method_call.method_name().compare(kMethodChildCreate) == 0) {
+    const auto map = std::get_if<flutter::EncodableMap>(method_call.arguments());
+    if (!map) {
+      return result->Error(kErrorCodeChildCreationFailed, "No arguments.");
+    }
+    return CreateChildWebview(*map, std::move(result));
+  }
+
+  if (method_call.method_name().compare(kMethodChildSetVisible) == 0) {
+    const auto visible = std::get_if<bool>(method_call.arguments());
+    if (!child_ || !visible) {
+      return result->Error(kErrorCodeChildMissing);
+    }
+    child_->SetVisible(*visible);
+    return result->Success();
+  }
+
+  if (method_call.method_name().compare(kMethodChildDispose) == 0) {
+    DisposeChildWebview();
+    return result->Success();
   }
 
   if (method_call.method_name().compare(kMethodDispose) == 0) {
@@ -356,6 +410,80 @@ void WebviewWindowsPlugin::ContinueCreateWebviewInstance(
         shared_result->Success(response);
       },
       profile);
+}
+
+void WebviewWindowsPlugin::CreateChildWebview(
+    const flutter::EncodableMap& args,
+    std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+  if (child_) {
+    return result->Error(kErrorCodeChildExists);
+  }
+  const auto url = GetOptionalValue<std::string>(args, "url");
+  const auto host_name = GetOptionalValue<std::string>(args, "hostName");
+  const auto folder = GetOptionalValue<std::string>(args, "folder");
+  if (!url || !host_name || !folder) {
+    return result->Error(kErrorCodeChildCreationFailed,
+                         "url, hostName and folder are required.");
+  }
+  if (!InitPlatform()) {
+    return result->Error(kErrorUnsupportedPlatform,
+                         "The platform is not supported");
+  }
+  const auto view = registrar_->GetView();
+  const HWND flutter_view = view ? view->GetNativeWindow() : nullptr;
+  const HWND top_level = flutter_view ? GetAncestor(flutter_view, GA_ROOT)
+                                      : nullptr;
+  if (!top_level) {
+    return result->Error(kErrorCodeChildCreationFailed,
+                         "The app window was not found.");
+  }
+
+  child_ = std::make_shared<ChildWebview>(top_level, flutter_view);
+  child_proc_id_ = registrar_->RegisterTopLevelWindowProcDelegate(
+      [child = std::weak_ptr<ChildWebview>(child_)](
+          HWND hwnd, UINT message, WPARAM wparam,
+          LPARAM lparam) -> std::optional<LRESULT> {
+        if (auto c = child.lock()) {
+          return c->HandleTopLevelMessage(hwnd, message, wparam, lparam);
+        }
+        return std::nullopt;
+      });
+
+  std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>
+      shared_result = std::move(result);
+  auto alive = alive_;
+  EnsureHost([this, alive, shared_result, url, host_name, folder](
+                 bool success, std::string error) {
+    if (!*alive) {
+      return;
+    }
+    if (!success || !child_) {
+      return shared_result->Error(kErrorCodeEnvironmentCreationFailed, error);
+    }
+    child_->Create(webview_host_->environment(), *host_name, *folder, *url,
+                   [alive, shared_result](bool ok, std::string message) {
+                     if (!*alive) {
+                       return;
+                     }
+                     if (ok) {
+                       shared_result->Success();
+                     } else {
+                       shared_result->Error(kErrorCodeChildCreationFailed,
+                                            message);
+                     }
+                   });
+  });
+}
+
+void WebviewWindowsPlugin::DisposeChildWebview() {
+  if (child_proc_id_ >= 0) {
+    registrar_->UnregisterTopLevelWindowProcDelegate(child_proc_id_);
+    child_proc_id_ = -1;
+  }
+  if (child_) {
+    child_->Close();
+    child_ = nullptr;
+  }
 }
 
 bool WebviewWindowsPlugin::InitPlatform() {
