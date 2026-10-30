@@ -138,9 +138,13 @@ HRESULT ChildWebview::OnControllerCreated(HRESULT result,
             const std::wstring target = SUCCEEDED(args->get_Uri(&uri)) && uri
                                             ? std::wstring(uri.get())
                                             : std::wstring();
-            if (DecideTopNavigation(target, allowed_origin_) !=
-                TopNavigation::kAllow) {
-              LeavePage(target, "navigation", true, args);
+            BOOL user = FALSE;
+            args->get_IsUserInitiated(&user);
+            const auto decision =
+                DecideTopNavigation(target, allowed_origin_, user == TRUE);
+            if (decision != TopNavigation::kAllow) {
+              LeavePage(target, "navigation",
+                        decision == TopNavigation::kOpenExternally, args);
             }
             return S_OK;
           })
@@ -156,7 +160,14 @@ HRESULT ChildWebview::OnControllerCreated(HRESULT result,
             const std::wstring target = SUCCEEDED(args->get_Uri(&uri)) && uri
                                             ? std::wstring(uri.get())
                                             : std::wstring();
-            LeavePage(target, "newWindow", false, nullptr);
+            // Never in the app; only a click by the user may go to the
+            // default browser (report 556 review).
+            BOOL user = FALSE;
+            args->get_IsUserInitiated(&user);
+            LeavePage(target, "newWindow",
+                      DecideTopNavigation(target, L"", user == TRUE) ==
+                          TopNavigation::kOpenExternally,
+                      nullptr);
             return S_OK;
           })
           .Get(),
@@ -236,12 +247,11 @@ void ChildWebview::PostJson(const std::string& json) {
 }
 
 void ChildWebview::LeavePage(const std::wstring& target, const char* what,
-                             bool cancel,
+                             bool external,
                              ICoreWebView2NavigationStartingEventArgs* navigation) {
-  if (cancel && navigation) {
+  if (navigation) {
     navigation->put_Cancel(TRUE);
   }
-  const bool external = IsWebUrl(target);
   if (external) {
     ShellExecuteW(nullptr, L"open", target.c_str(), nullptr, nullptr,
                   SW_SHOWNORMAL);

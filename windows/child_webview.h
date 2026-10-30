@@ -134,9 +134,10 @@ class ChildWebview : public std::enable_shared_from_this<ChildWebview> {
                               CreatedCallback callback);
   void FitToParent();
   void OnWebMessage(ICoreWebView2WebMessageReceivedEventArgs* args);
-  // Cancels a top-level navigation or a new window outside the page's
-  // origin and hands web links to the default browser.
-  void LeavePage(const std::wstring& target, const char* what, bool cancel,
+  // Cancels a top-level navigation ([navigation] set) or a new window outside
+  // the page's origin; [external] hands the target to the default browser
+  // (decided by DecideTopNavigation: web links clicked by the user only).
+  void LeavePage(const std::wstring& target, const char* what, bool external,
                  ICoreWebView2NavigationStartingEventArgs* navigation);
   void OnFrameCreated(ICoreWebView2Frame* frame);
   void RunFrameScript(const Frame& frame);
