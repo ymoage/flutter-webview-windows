@@ -70,12 +70,8 @@ class ChildWebview : public std::enable_shared_from_this<ChildWebview> {
   bool visible() const { return visible_; }
 
   // Position and size in physical pixels, in the client coordinates of the
-  // app window. The webview starts [top_inset] pixels below the top; the
-  // strip above it is painted in the accent color.
-  void Place(const RECT& bounds, int top_inset);
-
-  // The color of the strip above the webview (kChat: the stream's color).
-  void SetAccent(COLORREF color);
+  // app window.
+  void Place(const RECT& bounds);
 
   // Moves the keyboard focus into the webview.
   void Focus();
@@ -104,7 +100,6 @@ class ChildWebview : public std::enable_shared_from_this<ChildWebview> {
   EventRegistrationToken new_window_token_ = {};
   bool visible_ = false;
   bool closed_ = false;
-  int top_inset_ = 0;
   // Only messages from this origin are accepted (kPage: "https://<host>/",
   // kChat: "https://www.youtube.com/").
   std::wstring allowed_origin_;

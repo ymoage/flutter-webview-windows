@@ -43,6 +43,7 @@ constexpr auto kChildEventChannel = "io.jns.webview.win/child";
 constexpr auto kMethodChildEvent = "childWebviewEvent";
 constexpr auto kMethodChatWidthChanged = "childWebviewChatWidthChanged";
 constexpr wchar_t kSplitterClassName[] = L"PyokominChildSplitter";
+constexpr wchar_t kAccentClassName[] = L"PyokominChildAccent";
 // The strip above the chat in the stream's color (logical pixels).
 constexpr int kChatAccentDip = 3;
 
@@ -123,6 +124,8 @@ class WebviewWindowsPlugin : public flutter::Plugin {
   int last_chat_width_px_ = 0;
   COLORREF chat_accent_ = RGB(58, 63, 71);
   HWND splitter_ = nullptr;
+  // The strip above the chat area in the stream's color.
+  HWND accent_ = nullptr;
   bool splitter_dragging_ = false;
   int drag_start_x_ = 0;
   int drag_start_width_px_ = 0;
@@ -143,8 +146,12 @@ class WebviewWindowsPlugin : public flutter::Plugin {
   // Places the page, the splitter and the shown chat side by side
   // (LayoutChildren). The only place that positions child windows.
   void Relayout();
+  // The splitter and the accent strip (small windows of the plugin), made
+  // and destroyed together.
   void EnsureSplitter();
   void DestroySplitter();
+  static LRESULT CALLBACK AccentProc(HWND hwnd, UINT message, WPARAM wparam,
+                                     LPARAM lparam);
   static LRESULT CALLBACK SplitterProc(HWND hwnd, UINT message, WPARAM wparam,
                                        LPARAM lparam);
   LRESULT HandleSplitterMessage(HWND hwnd, UINT message, WPARAM wparam,
@@ -392,10 +399,10 @@ void WebviewWindowsPlugin::HandleMethodCall(
     if (color) {
       const auto c = static_cast<uint32_t>(*color);
       chat_accent_ = RGB((c >> 16) & 0xff, (c >> 8) & 0xff, c & 0xff);
-      for (auto& [id, child] : children_) {
-        if (child->role() == ChildWebview::Role::kChat) {
-          child->SetAccent(chat_accent_);
-        }
+      if (accent_) {
+        SetWindowLongPtr(accent_, GWLP_USERDATA,
+                         static_cast<LONG_PTR>(chat_accent_));
+        InvalidateRect(accent_, nullptr, TRUE);
       }
     }
     return result->Success();
@@ -626,9 +633,6 @@ void WebviewWindowsPlugin::CreateChildWebview(
                 }
               });
     // The container exists now (the controller follows later): place it.
-    if (c->role() == ChildWebview::Role::kChat) {
-      c->SetAccent(chat_accent_);
-    }
     Relayout();
   });
 }
@@ -728,26 +732,39 @@ void WebviewWindowsPlugin::Relayout() {
   };
 
   if (page) {
-    page->Place(to_rect(layout.page), 0);
+    page->Place(to_rect(layout.page));
   }
   if (open) {
     last_chat_width_px_ = layout.chat.width;
     EnsureSplitter();
     if (splitter_) {
-      MoveWindow(splitter_, layout.splitter.x, layout.splitter.y,
-                 layout.splitter.width, layout.splitter.height, TRUE);
-      ShowWindow(splitter_, SW_SHOWNA);
+      // Above the Flutter view (a full-size sibling); otherwise the view
+      // takes the mouse and both paint the strip.
+      SetWindowPos(splitter_, HWND_TOP, layout.splitter.x, layout.splitter.y,
+                   layout.splitter.width, layout.splitter.height,
+                   SWP_SHOWWINDOW | SWP_NOACTIVATE);
     }
   } else if (splitter_) {
     ShowWindow(splitter_, SW_HIDE);
   }
+  // The accent strip takes the top of the chat area; the chat goes below it.
+  const int accent = open ? DipToPx(kChatAccentDip, dpi) : 0;
+  if (open && accent_) {
+    SetWindowPos(accent_, HWND_TOP, layout.chat.x, layout.chat.y,
+                 layout.chat.width, accent, SWP_SHOWWINDOW | SWP_NOACTIVATE);
+  } else if (accent_) {
+    ShowWindow(accent_, SW_HIDE);
+  }
+  LayoutRect chat_rect = layout.chat;
+  chat_rect.y += accent;
+  chat_rect.height = chat_rect.height > accent ? chat_rect.height - accent : 0;
   // The shown chat goes to the chat area; the others are hidden but alive.
   for (auto& [id, child] : children_) {
     if (child->role() != ChildWebview::Role::kChat) {
       continue;
     }
     if (open && child == chat) {
-      child->Place(to_rect(layout.chat), DipToPx(kChatAccentDip, dpi));
+      child->Place(to_rect(chat_rect));
       if (!child->visible()) {
         child->SetVisible(true);
       }
@@ -783,6 +800,46 @@ void WebviewWindowsPlugin::EnsureSplitter() {
     SetWindowLongPtr(splitter_, GWLP_USERDATA,
                      reinterpret_cast<LONG_PTR>(this));
   }
+
+  static bool accent_registered = false;
+  if (!accent_registered) {
+    WNDCLASS window_class = {};
+    window_class.lpszClassName = kAccentClassName;
+    window_class.lpfnWndProc = &WebviewWindowsPlugin::AccentProc;
+    window_class.hInstance = GetModuleHandle(nullptr);
+    window_class.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    RegisterClass(&window_class);
+    accent_registered = true;
+  }
+  accent_ = CreateWindowEx(0, kAccentClassName, L"", WS_CHILD | WS_CLIPSIBLINGS,
+                           0, 0, 0, 0, top_level_, nullptr,
+                           GetModuleHandle(nullptr), nullptr);
+  if (accent_) {
+    SetWindowLongPtr(accent_, GWLP_USERDATA,
+                     static_cast<LONG_PTR>(chat_accent_));
+  }
+}
+
+// static
+LRESULT CALLBACK WebviewWindowsPlugin::AccentProc(HWND hwnd, UINT message,
+                                                  WPARAM wparam,
+                                                  LPARAM lparam) {
+  switch (message) {
+    case WM_ERASEBKGND:
+      return 1;
+    case WM_PAINT: {
+      // The color is kept in GWLP_USERDATA (no pointer to the plugin).
+      PAINTSTRUCT paint;
+      HDC dc = BeginPaint(hwnd, &paint);
+      HBRUSH brush = CreateSolidBrush(
+          static_cast<COLORREF>(GetWindowLongPtr(hwnd, GWLP_USERDATA)));
+      FillRect(dc, &paint.rcPaint, brush);
+      DeleteObject(brush);
+      EndPaint(hwnd, &paint);
+      return 0;
+    }
+  }
+  return DefWindowProc(hwnd, message, wparam, lparam);
 }
 
 void WebviewWindowsPlugin::DestroySplitter() {
@@ -793,6 +850,10 @@ void WebviewWindowsPlugin::DestroySplitter() {
   }
   splitter_ = nullptr;
   splitter_dragging_ = false;
+  if (accent_ && IsWindow(accent_)) {
+    DestroyWindow(accent_);
+  }
+  accent_ = nullptr;
 }
 
 // static

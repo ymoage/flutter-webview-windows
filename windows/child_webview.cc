@@ -16,27 +16,6 @@ constexpr wchar_t kHideMessage[] = L"hide";
 constexpr wchar_t kChatAllowedPrefix[] = L"https://www.youtube.com/live_chat";
 constexpr wchar_t kChatOrigin[] = L"https://www.youtube.com/";
 
-// Paints the container in its accent color (kept in GWLP_USERDATA). Only the
-// strip above the webview shows it.
-LRESULT CALLBACK ContainerProc(HWND hwnd, UINT message, WPARAM wparam,
-                               LPARAM lparam) {
-  switch (message) {
-    case WM_ERASEBKGND:
-      return 1;
-    case WM_PAINT: {
-      PAINTSTRUCT paint;
-      HDC dc = BeginPaint(hwnd, &paint);
-      HBRUSH brush = CreateSolidBrush(
-          static_cast<COLORREF>(GetWindowLongPtr(hwnd, GWLP_USERDATA)));
-      FillRect(dc, &paint.rcPaint, brush);
-      DeleteObject(brush);
-      EndPaint(hwnd, &paint);
-      return 0;
-    }
-  }
-  return DefWindowProc(hwnd, message, wparam, lparam);
-}
-
 void EnsureContainerClass() {
   static bool registered = false;
   if (registered) {
@@ -44,7 +23,7 @@ void EnsureContainerClass() {
   }
   WNDCLASS window_class = {};
   window_class.lpszClassName = kContainerClassName;
-  window_class.lpfnWndProc = &ContainerProc;
+  window_class.lpfnWndProc = &DefWindowProc;
   window_class.hInstance = GetModuleHandle(nullptr);
   window_class.hCursor = LoadCursor(nullptr, IDC_ARROW);
   RegisterClass(&window_class);
@@ -229,22 +208,13 @@ void ChildWebview::SetVisible(bool visible) {
   }
 }
 
-void ChildWebview::Place(const RECT& bounds, int top_inset) {
+void ChildWebview::Place(const RECT& bounds) {
   if (closed_ || !container_) {
     return;
   }
-  top_inset_ = top_inset;
   MoveWindow(container_, bounds.left, bounds.top, bounds.right - bounds.left,
              bounds.bottom - bounds.top, TRUE);
   ApplyControllerBounds();
-}
-
-void ChildWebview::SetAccent(COLORREF color) {
-  if (closed_ || !container_) {
-    return;
-  }
-  SetWindowLongPtr(container_, GWLP_USERDATA, static_cast<LONG_PTR>(color));
-  InvalidateRect(container_, nullptr, TRUE);
 }
 
 void ChildWebview::Focus() {
@@ -289,9 +259,6 @@ void ChildWebview::ApplyControllerBounds() {
   if (controller_ && container_) {
     RECT bounds = {};
     GetClientRect(container_, &bounds);
-    bounds.top = bounds.top + top_inset_ < bounds.bottom
-                     ? bounds.top + top_inset_
-                     : bounds.bottom;
     controller_->put_Bounds(bounds);
   }
 }
