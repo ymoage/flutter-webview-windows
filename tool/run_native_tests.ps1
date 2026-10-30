@@ -11,7 +11,7 @@ New-Item -ItemType Directory -Force $out | Out-Null
 $code = 0
 Push-Location $out
 try {
-  foreach ($name in @("child_focus_test", "child_layout_test")) {
+  foreach ($name in @("child_focus_test", "child_chat_guard_test")) {
     $src = Join-Path $root "windows\test\$name.cc"
     cmd /c "`"$vcvars`" >nul && cl /nologo /EHsc /std:c++17 /W4 /WX `"$src`" user32.lib kernel32.lib >nul"
     if ($LASTEXITCODE -ne 0) { throw "build failed: $name" }

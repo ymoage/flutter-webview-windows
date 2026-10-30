@@ -57,6 +57,7 @@ set(PLUGIN_SOURCES
   "webview.cc"
   "webview_host.cc"
   "child_webview.cc"
+  "floating_chat.cc"
   "webview_bridge.cc"
   "texture_bridge.cc"
   "texture_bridge_gpu.cc"
