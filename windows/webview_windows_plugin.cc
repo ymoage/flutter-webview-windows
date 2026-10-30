@@ -6,12 +6,15 @@
 #include <windows.h>
 
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#include "child_focus.h"
+#include "child_layout.h"
 #include "child_webview.h"
 #include "util/string_converter.h"
 #include "webview_bridge.h"
@@ -27,10 +30,21 @@ constexpr auto kMethodInitialize = "initialize";
 constexpr auto kMethodDispose = "dispose";
 constexpr auto kMethodInitializeEnvironment = "initializeEnvironment";
 constexpr auto kMethodGetWebViewVersion = "getWebViewVersion";
-// Pyokomin (ADR-0063): the child-window webview (one per app).
+// Pyokomin (ADR-0063, ADR-0064): the child-window webviews (by id).
 constexpr auto kMethodChildCreate = "childWebviewCreate";
 constexpr auto kMethodChildSetVisible = "childWebviewSetVisible";
+// ADR-0065: the chat area at the right edge of the window.
+constexpr auto kMethodChildShowChat = "childWebviewShowChat";
+constexpr auto kMethodChildSetChatWidth = "childWebviewSetChatWidth";
+constexpr auto kMethodChildSetChatAccent = "childWebviewSetChatAccent";
 constexpr auto kMethodChildDispose = "childWebviewDispose";
+// Events to Dart, on their own channel.
+constexpr auto kChildEventChannel = "io.jns.webview.win/child";
+constexpr auto kMethodChildEvent = "childWebviewEvent";
+constexpr auto kMethodChatWidthChanged = "childWebviewChatWidthChanged";
+constexpr wchar_t kSplitterClassName[] = L"PyokominChildSplitter";
+// The strip above the chat in the stream's color (logical pixels).
+constexpr int kChatAccentDip = 3;
 
 constexpr auto kErrorCodeInvalidId = "invalid_id";
 constexpr auto kErrorCodeEnvironmentCreationFailed =
@@ -52,6 +66,22 @@ std::optional<T> GetOptionalValue(const flutter::EncodableMap& map,
     if (val) {
       return *val;
     }
+  }
+  return std::nullopt;
+}
+
+// Dart ints arrive as int32 or int64 depending on their size.
+std::optional<int64_t> GetOptionalInt(const flutter::EncodableMap& map,
+                                      const std::string& key) {
+  const auto it = map.find(flutter::EncodableValue(key));
+  if (it == map.end()) {
+    return std::nullopt;
+  }
+  if (const auto v32 = std::get_if<int32_t>(&it->second)) {
+    return *v32;
+  }
+  if (const auto v64 = std::get_if<int64_t>(&it->second)) {
+    return *v64;
   }
   return std::nullopt;
 }
@@ -78,11 +108,28 @@ class WebviewWindowsPlugin : public flutter::Plugin {
   std::vector<std::function<void(bool success, std::string error)>>
       pending_host_callbacks_;
 
-  // Pyokomin (ADR-0063): the child-window webview and its window proc
-  // delegate on the top-level window (-1 = not registered).
+  // Pyokomin (ADR-0063, ADR-0064): the child-window webviews by id, and one
+  // window proc delegate on the top-level window for all of them
+  // (-1 = not registered).
   flutter::PluginRegistrarWindows* registrar_;
-  std::shared_ptr<ChildWebview> child_;
+  std::map<int64_t, std::shared_ptr<ChildWebview>> children_;
   int child_proc_id_ = -1;
+  HWND flutter_view_ = nullptr;
+  HWND top_level_ = nullptr;
+  // ADR-0065: the chat shown in the chat area (none = the area is closed),
+  // the wanted width (logical pixels), the accent and the splitter window.
+  std::optional<int64_t> shown_chat_;
+  int chat_width_dip_ = kChatDefaultWidthDip;
+  int last_chat_width_px_ = 0;
+  COLORREF chat_accent_ = RGB(58, 63, 71);
+  HWND splitter_ = nullptr;
+  bool splitter_dragging_ = false;
+  int drag_start_x_ = 0;
+  int drag_start_width_px_ = 0;
+  // The child that got the keyboard focus last (kFocusRunner = none).
+  int64_t last_focused_child_ = kFocusRunner;
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
+      child_events_;
   // Set to false in the destructor. Completion handlers that outlive the
   // plugin must not answer Dart (the engine is gone, #194).
   std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
@@ -90,7 +137,24 @@ class WebviewWindowsPlugin : public flutter::Plugin {
   void CreateChildWebview(
       const flutter::EncodableMap& args,
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
-  void DisposeChildWebview();
+  ChildWebview::Listener MakeChildListener();
+  void SetChildVisible(int64_t id, bool visible);
+  void ShowChat(std::optional<int64_t> id);
+  // Places the page, the splitter and the shown chat side by side
+  // (LayoutChildren). The only place that positions child windows.
+  void Relayout();
+  void EnsureSplitter();
+  void DestroySplitter();
+  static LRESULT CALLBACK SplitterProc(HWND hwnd, UINT message, WPARAM wparam,
+                                       LPARAM lparam);
+  LRESULT HandleSplitterMessage(HWND hwnd, UINT message, WPARAM wparam,
+                                LPARAM lparam);
+  void DisposeChildWebview(int64_t id);
+  // After a child was hidden or closed: give the focus to the shown page (if
+  // a chat went away) or to the Flutter view.
+  void FocusAfterChildGone(int64_t id, bool was_page);
+  std::optional<LRESULT> HandleTopLevelMessage(UINT message, WPARAM wparam);
+  void SendChildEvent(flutter::EncodableMap event);
 
   WNDCLASS window_class_ = {};
   flutter::TextureRegistrar* textures_;
@@ -148,6 +212,10 @@ WebviewWindowsPlugin::WebviewWindowsPlugin(
   window_class_.lpszClassName = L"FlutterWebviewMessage";
   window_class_.lpfnWndProc = &DefWindowProc;
   RegisterClass(&window_class_);
+  child_events_ =
+      std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+          messenger, kChildEventChannel,
+          &flutter::StandardMethodCodec::GetInstance());
 }
 
 WebviewWindowsPlugin::~WebviewWindowsPlugin() {
@@ -162,12 +230,14 @@ WebviewWindowsPlugin::~WebviewWindowsPlugin() {
   // while the engine is alive and is unaffected: the flag stays true there,
   // so handlers and textures are still released properly.
   *alive_ = false;
-  // Pyokomin (ADR-0063): close the child-window webview without touching the
-  // registrar (the window proc delegate goes away with the registrar).
-  if (child_) {
-    child_->Close();
-    child_ = nullptr;
+  // Pyokomin (ADR-0063, ADR-0064): close every child-window webview without
+  // touching the registrar (the window proc delegate goes away with the
+  // registrar). Their listeners check alive_, so nothing reaches Dart.
+  for (auto& [id, child] : children_) {
+    child->Close();
   }
+  children_.clear();
+  DestroySplitter();
 
   for (auto& [texture_id, bridge] : instances_) {
     if (bridge) {
@@ -275,16 +345,68 @@ void WebviewWindowsPlugin::HandleMethodCall(
   }
 
   if (method_call.method_name().compare(kMethodChildSetVisible) == 0) {
-    const auto visible = std::get_if<bool>(method_call.arguments());
-    if (!child_ || !visible) {
+    const auto map = std::get_if<flutter::EncodableMap>(method_call.arguments());
+    const auto id = map ? GetOptionalInt(*map, "id") : std::nullopt;
+    const auto visible =
+        map ? GetOptionalValue<bool>(*map, "visible") : std::nullopt;
+    if (!id || !visible || children_.find(*id) == children_.end()) {
       return result->Error(kErrorCodeChildMissing);
     }
-    child_->SetVisible(*visible);
+    if (children_.at(*id)->role() == ChildWebview::Role::kChat) {
+      return result->Error(kErrorCodeChildMissing,
+                           "A chat is shown with childWebviewShowChat.");
+    }
+    SetChildVisible(*id, *visible);
+    return result->Success();
+  }
+
+  if (method_call.method_name().compare(kMethodChildShowChat) == 0) {
+    // {id: null} (or no id) closes the chat area.
+    const auto map = std::get_if<flutter::EncodableMap>(method_call.arguments());
+    const auto id = map ? GetOptionalInt(*map, "id") : std::nullopt;
+    if (id) {
+      const auto it = children_.find(*id);
+      if (it == children_.end() ||
+          it->second->role() != ChildWebview::Role::kChat) {
+        return result->Error(kErrorCodeChildMissing);
+      }
+    }
+    ShowChat(id);
+    return result->Success();
+  }
+
+  if (method_call.method_name().compare(kMethodChildSetChatWidth) == 0) {
+    const auto map = std::get_if<flutter::EncodableMap>(method_call.arguments());
+    const auto width = map ? GetOptionalInt(*map, "width") : std::nullopt;
+    if (width && *width > 0) {
+      chat_width_dip_ = static_cast<int>(*width);
+      Relayout();
+    }
+    return result->Success();
+  }
+
+  if (method_call.method_name().compare(kMethodChildSetChatAccent) == 0) {
+    // 0xAARRGGBB (alpha is ignored).
+    const auto map = std::get_if<flutter::EncodableMap>(method_call.arguments());
+    const auto color = map ? GetOptionalInt(*map, "color") : std::nullopt;
+    if (color) {
+      const auto c = static_cast<uint32_t>(*color);
+      chat_accent_ = RGB((c >> 16) & 0xff, (c >> 8) & 0xff, c & 0xff);
+      for (auto& [id, child] : children_) {
+        if (child->role() == ChildWebview::Role::kChat) {
+          child->SetAccent(chat_accent_);
+        }
+      }
+    }
     return result->Success();
   }
 
   if (method_call.method_name().compare(kMethodChildDispose) == 0) {
-    DisposeChildWebview();
+    const auto map = std::get_if<flutter::EncodableMap>(method_call.arguments());
+    const auto id = map ? GetOptionalInt(*map, "id") : std::nullopt;
+    if (id) {
+      DisposeChildWebview(*id);
+    }
     return result->Success();
   }
 
@@ -415,15 +537,30 @@ void WebviewWindowsPlugin::ContinueCreateWebviewInstance(
 void WebviewWindowsPlugin::CreateChildWebview(
     const flutter::EncodableMap& args,
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
-  if (child_) {
-    return result->Error(kErrorCodeChildExists);
-  }
+  const auto id = GetOptionalInt(args, "id");
+  const auto role_name = GetOptionalValue<std::string>(args, "role");
   const auto url = GetOptionalValue<std::string>(args, "url");
-  const auto host_name = GetOptionalValue<std::string>(args, "hostName");
-  const auto folder = GetOptionalValue<std::string>(args, "folder");
-  if (!url || !host_name || !folder) {
+  const auto host_name =
+      GetOptionalValue<std::string>(args, "hostName").value_or("");
+  const auto folder = GetOptionalValue<std::string>(args, "folder").value_or("");
+  if (!id || !role_name || !url) {
     return result->Error(kErrorCodeChildCreationFailed,
-                         "url, hostName and folder are required.");
+                         "id, role and url are required.");
+  }
+  ChildWebview::Role role;
+  if (*role_name == "page") {
+    role = ChildWebview::Role::kPage;
+    if (host_name.empty() || folder.empty()) {
+      return result->Error(kErrorCodeChildCreationFailed,
+                           "A page needs hostName and folder.");
+    }
+  } else if (*role_name == "chat") {
+    role = ChildWebview::Role::kChat;
+  } else {
+    return result->Error(kErrorCodeChildCreationFailed, "Unknown role.");
+  }
+  if (children_.find(*id) != children_.end()) {
+    return result->Error(kErrorCodeChildExists);
   }
   if (!InitPlatform()) {
     return result->Error(kErrorUnsupportedPlatform,
@@ -437,53 +574,379 @@ void WebviewWindowsPlugin::CreateChildWebview(
     return result->Error(kErrorCodeChildCreationFailed,
                          "The app window was not found.");
   }
+  flutter_view_ = flutter_view;
+  top_level_ = top_level;
 
-  child_ = std::make_shared<ChildWebview>(top_level, flutter_view);
-  child_proc_id_ = registrar_->RegisterTopLevelWindowProcDelegate(
-      [child = std::weak_ptr<ChildWebview>(child_)](
-          HWND hwnd, UINT message, WPARAM wparam,
-          LPARAM lparam) -> std::optional<LRESULT> {
-        if (auto c = child.lock()) {
-          return c->HandleTopLevelMessage(hwnd, message, wparam, lparam);
-        }
-        return std::nullopt;
-      });
+  auto child = std::make_shared<ChildWebview>(*id, role, top_level,
+                                              flutter_view, MakeChildListener());
+  children_[*id] = child;
+  if (child_proc_id_ < 0) {
+    auto proc_alive = alive_;
+    child_proc_id_ = registrar_->RegisterTopLevelWindowProcDelegate(
+        [this, proc_alive](HWND hwnd, UINT message, WPARAM wparam,
+                           LPARAM lparam) -> std::optional<LRESULT> {
+          if (!*proc_alive) {
+            return std::nullopt;
+          }
+          return HandleTopLevelMessage(message, wparam);
+        });
+  }
 
   std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>
       shared_result = std::move(result);
   auto alive = alive_;
-  EnsureHost([this, alive, shared_result, url, host_name, folder](
-                 bool success, std::string error) {
+  // Hold the child that was asked for: if it is disposed (and maybe created
+  // again under the same id) while the environment is still being created,
+  // this completion must not create the newer one a second time.
+  std::weak_ptr<ChildWebview> weak_child = child;
+  const int64_t child_id = *id;
+  EnsureHost([this, alive, shared_result, weak_child, child_id, url, host_name,
+              folder](bool success, std::string error) {
     if (!*alive) {
       return;
     }
-    if (!success || !child_) {
+    auto c = weak_child.lock();
+    const auto it = children_.find(child_id);
+    if (!c || it == children_.end() || it->second != c) {
+      return shared_result->Error(kErrorCodeChildCreationFailed,
+                                  "Disposed before the environment was ready.");
+    }
+    if (!success) {
       return shared_result->Error(kErrorCodeEnvironmentCreationFailed, error);
     }
-    child_->Create(webview_host_->environment(), *host_name, *folder, *url,
-                   [alive, shared_result](bool ok, std::string message) {
-                     if (!*alive) {
-                       return;
-                     }
-                     if (ok) {
-                       shared_result->Success();
-                     } else {
-                       shared_result->Error(kErrorCodeChildCreationFailed,
-                                            message);
-                     }
-                   });
+    c->Create(webview_host_->environment(), host_name, folder, *url,
+              [alive, shared_result](bool ok, std::string message) {
+                if (!*alive) {
+                  return;
+                }
+                if (ok) {
+                  shared_result->Success();
+                } else {
+                  shared_result->Error(kErrorCodeChildCreationFailed, message);
+                }
+              });
+    // The container exists now (the controller follows later): place it.
+    if (c->role() == ChildWebview::Role::kChat) {
+      c->SetAccent(chat_accent_);
+    }
+    Relayout();
   });
 }
 
-void WebviewWindowsPlugin::DisposeChildWebview() {
-  if (child_proc_id_ >= 0) {
-    registrar_->UnregisterTopLevelWindowProcDelegate(child_proc_id_);
-    child_proc_id_ = -1;
+ChildWebview::Listener WebviewWindowsPlugin::MakeChildListener() {
+  auto alive = alive_;
+  ChildWebview::Listener listener;
+  listener.on_focus = [this, alive](int64_t id) {
+    if (*alive) {
+      last_focused_child_ = id;
+    }
+  };
+  listener.on_hidden_by_page = [this, alive](int64_t id) {
+    if (!*alive) {
+      return;
+    }
+    FocusAfterChildGone(id, true);
+    // The chat area goes with the page.
+    Relayout();
+    SendChildEvent(flutter::EncodableMap{
+        {flutter::EncodableValue("id"), flutter::EncodableValue(id)},
+        {flutter::EncodableValue("kind"), flutter::EncodableValue("hidden")},
+    });
+  };
+  listener.on_message = [this, alive](int64_t id, const std::string& source,
+                                      const std::string& message) {
+    if (!*alive) {
+      return;
+    }
+    SendChildEvent(flutter::EncodableMap{
+        {flutter::EncodableValue("id"), flutter::EncodableValue(id)},
+        {flutter::EncodableValue("kind"), flutter::EncodableValue("message")},
+        {flutter::EncodableValue("source"), flutter::EncodableValue(source)},
+        {flutter::EncodableValue("message"), flutter::EncodableValue(message)},
+    });
+  };
+  listener.on_blocked = [this, alive](int64_t id, const std::string& what) {
+    if (!*alive) {
+      return;
+    }
+    SendChildEvent(flutter::EncodableMap{
+        {flutter::EncodableValue("id"), flutter::EncodableValue(id)},
+        {flutter::EncodableValue("kind"), flutter::EncodableValue("blocked")},
+        {flutter::EncodableValue("what"), flutter::EncodableValue(what)},
+    });
+  };
+  return listener;
+}
+
+void WebviewWindowsPlugin::SetChildVisible(int64_t id, bool visible) {
+  const auto child = children_.at(id);
+  const bool was_visible = child->visible();
+  child->SetVisible(visible);
+  // The chat area is shown only with the page.
+  Relayout();
+  if (!visible && was_visible) {
+    FocusAfterChildGone(id, child->role() == ChildWebview::Role::kPage);
   }
-  if (child_) {
-    child_->Close();
-    child_ = nullptr;
+}
+
+void WebviewWindowsPlugin::ShowChat(std::optional<int64_t> id) {
+  shown_chat_ = id;
+  Relayout();
+}
+
+void WebviewWindowsPlugin::Relayout() {
+  if (!top_level_ || !IsWindow(top_level_)) {
+    return;
   }
+  std::shared_ptr<ChildWebview> page;
+  for (auto& [id, child] : children_) {
+    if (child->role() == ChildWebview::Role::kPage) {
+      page = child;
+      break;
+    }
+  }
+  std::shared_ptr<ChildWebview> chat;
+  if (shown_chat_) {
+    const auto it = children_.find(*shown_chat_);
+    if (it != children_.end()) {
+      chat = it->second;
+    }
+  }
+  const bool open = page && page->visible() && chat;
+
+  RECT client = {};
+  GetClientRect(top_level_, &client);
+  UINT dpi = GetDpiForWindow(top_level_);
+  if (dpi == 0) {
+    dpi = 96;
+  }
+  const ChildLayout layout =
+      LayoutChildren(client.right - client.left, client.bottom - client.top,
+                     chat_width_dip_, dpi, open);
+  const auto to_rect = [](const LayoutRect& r) {
+    return RECT{r.x, r.y, r.x + r.width, r.y + r.height};
+  };
+
+  if (page) {
+    page->Place(to_rect(layout.page), 0);
+  }
+  if (open) {
+    last_chat_width_px_ = layout.chat.width;
+    EnsureSplitter();
+    if (splitter_) {
+      MoveWindow(splitter_, layout.splitter.x, layout.splitter.y,
+                 layout.splitter.width, layout.splitter.height, TRUE);
+      ShowWindow(splitter_, SW_SHOWNA);
+    }
+  } else if (splitter_) {
+    ShowWindow(splitter_, SW_HIDE);
+  }
+  // The shown chat goes to the chat area; the others are hidden but alive.
+  for (auto& [id, child] : children_) {
+    if (child->role() != ChildWebview::Role::kChat) {
+      continue;
+    }
+    if (open && child == chat) {
+      child->Place(to_rect(layout.chat), DipToPx(kChatAccentDip, dpi));
+      if (!child->visible()) {
+        child->SetVisible(true);
+      }
+    } else if (child->visible()) {
+      child->SetVisible(false);
+      if (last_focused_child_ == id) {
+        FocusAfterChildGone(id, false);
+      }
+    }
+  }
+}
+
+void WebviewWindowsPlugin::EnsureSplitter() {
+  if (splitter_ || !top_level_) {
+    return;
+  }
+  static bool registered = false;
+  if (!registered) {
+    WNDCLASS window_class = {};
+    window_class.lpszClassName = kSplitterClassName;
+    window_class.lpfnWndProc = &WebviewWindowsPlugin::SplitterProc;
+    window_class.hInstance = GetModuleHandle(nullptr);
+    window_class.hCursor = LoadCursor(nullptr, IDC_SIZEWE);
+    window_class.hbrBackground = CreateSolidBrush(RGB(58, 63, 71));
+    RegisterClass(&window_class);
+    registered = true;
+  }
+  splitter_ = CreateWindowEx(0, kSplitterClassName, L"",
+                             WS_CHILD | WS_CLIPSIBLINGS, 0, 0, 0, 0,
+                             top_level_, nullptr, GetModuleHandle(nullptr),
+                             nullptr);
+  if (splitter_) {
+    SetWindowLongPtr(splitter_, GWLP_USERDATA,
+                     reinterpret_cast<LONG_PTR>(this));
+  }
+}
+
+void WebviewWindowsPlugin::DestroySplitter() {
+  if (splitter_ && IsWindow(splitter_)) {
+    // Detach first: no message may reach this plugin any more.
+    SetWindowLongPtr(splitter_, GWLP_USERDATA, 0);
+    DestroyWindow(splitter_);
+  }
+  splitter_ = nullptr;
+  splitter_dragging_ = false;
+}
+
+// static
+LRESULT CALLBACK WebviewWindowsPlugin::SplitterProc(HWND hwnd, UINT message,
+                                                    WPARAM wparam,
+                                                    LPARAM lparam) {
+  auto plugin = reinterpret_cast<WebviewWindowsPlugin*>(
+      GetWindowLongPtr(hwnd, GWLP_USERDATA));
+  if (plugin) {
+    return plugin->HandleSplitterMessage(hwnd, message, wparam, lparam);
+  }
+  return DefWindowProc(hwnd, message, wparam, lparam);
+}
+
+LRESULT WebviewWindowsPlugin::HandleSplitterMessage(HWND hwnd, UINT message,
+                                                    WPARAM wparam,
+                                                    LPARAM lparam) {
+  switch (message) {
+    case WM_LBUTTONDOWN: {
+      POINT point = {};
+      GetCursorPos(&point);
+      drag_start_x_ = point.x;
+      drag_start_width_px_ = last_chat_width_px_;
+      splitter_dragging_ = true;
+      SetCapture(hwnd);
+      return 0;
+    }
+    case WM_MOUSEMOVE: {
+      if (!splitter_dragging_) {
+        break;
+      }
+      POINT point = {};
+      GetCursorPos(&point);
+      UINT dpi = GetDpiForWindow(hwnd);
+      if (dpi == 0) {
+        dpi = 96;
+      }
+      // Dragging to the left widens the chat area.
+      const int width_px = drag_start_width_px_ - (point.x - drag_start_x_);
+      chat_width_dip_ = PxToDip(width_px > 0 ? width_px : 0, dpi);
+      Relayout();
+      // Keep the wish inside the limits, so that dragging back reacts at once.
+      chat_width_dip_ = PxToDip(last_chat_width_px_, dpi);
+      return 0;
+    }
+    case WM_LBUTTONUP:
+      if (splitter_dragging_) {
+        ReleaseCapture();
+      }
+      return 0;
+    case WM_CAPTURECHANGED:
+      if (splitter_dragging_) {
+        splitter_dragging_ = false;
+        // Only when the drag ends: the app keeps the width in its settings.
+        if (*alive_ && child_events_) {
+          child_events_->InvokeMethod(
+              kMethodChatWidthChanged,
+              std::make_unique<flutter::EncodableValue>(flutter::EncodableMap{
+                  {flutter::EncodableValue("width"),
+                   flutter::EncodableValue(chat_width_dip_)},
+              }));
+        }
+      }
+      return 0;
+  }
+  return DefWindowProc(hwnd, message, wparam, lparam);
+}
+
+void WebviewWindowsPlugin::DisposeChildWebview(int64_t id) {
+  const auto it = children_.find(id);
+  if (it == children_.end()) {
+    return;
+  }
+  const auto child = it->second;
+  children_.erase(it);
+  const bool was_visible = child->visible();
+  const bool is_page = child->role() == ChildWebview::Role::kPage;
+  child->Close();
+  if (shown_chat_ == id) {
+    // Closing the shown chat closes the chat area.
+    shown_chat_.reset();
+  }
+  Relayout();
+  if (was_visible) {
+    FocusAfterChildGone(id, is_page);
+  }
+  if (last_focused_child_ == id) {
+    last_focused_child_ = kFocusRunner;
+  }
+  if (children_.empty()) {
+    DestroySplitter();
+    if (child_proc_id_ >= 0) {
+      registrar_->UnregisterTopLevelWindowProcDelegate(child_proc_id_);
+      child_proc_id_ = -1;
+    }
+  }
+}
+
+void WebviewWindowsPlugin::FocusAfterChildGone(int64_t id, bool was_page) {
+  if (!was_page) {
+    for (auto& [other_id, other] : children_) {
+      if (other_id != id && other->role() == ChildWebview::Role::kPage &&
+          other->visible()) {
+        other->Focus();
+        return;
+      }
+    }
+  }
+  if (flutter_view_ && IsWindow(flutter_view_)) {
+    SetFocus(flutter_view_);
+  }
+}
+
+std::optional<LRESULT> WebviewWindowsPlugin::HandleTopLevelMessage(
+    UINT message, WPARAM wparam) {
+  switch (message) {
+    case WM_SIZE:
+      if (wparam != SIZE_MINIMIZED) {
+        Relayout();
+      }
+      // The runner still resizes the Flutter view.
+      return std::nullopt;
+    case WM_DPICHANGED:
+      // The runner resizes the window too (WM_SIZE follows).
+      Relayout();
+      return std::nullopt;
+    case WM_MOVE:
+      for (auto& [id, child] : children_) {
+        child->OnParentMoved();
+      }
+      return std::nullopt;
+  }
+  std::vector<ChildFocusCandidate> candidates;
+  for (auto& [id, child] : children_) {
+    candidates.push_back(
+        {id, child->visible(), child->role() == ChildWebview::Role::kPage});
+  }
+  const int64_t target =
+      DecideActivateFocus(message, wparam, last_focused_child_, candidates);
+  if (target == kFocusRunner) {
+    return std::nullopt;
+  }
+  // Taken over: the runner would give the focus to the Flutter view.
+  children_.at(target)->Focus();
+  return 0;
+}
+
+void WebviewWindowsPlugin::SendChildEvent(flutter::EncodableMap event) {
+  if (!*alive_ || !child_events_) {
+    return;
+  }
+  child_events_->InvokeMethod(
+      kMethodChildEvent,
+      std::make_unique<flutter::EncodableValue>(std::move(event)));
 }
 
 bool WebviewWindowsPlugin::InitPlatform() {
