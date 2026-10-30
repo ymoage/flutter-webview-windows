@@ -35,6 +35,7 @@ constexpr auto kMethodGetWebViewVersion = "getWebViewVersion";
 constexpr auto kMethodChildCreate = "childWebviewCreate";
 constexpr auto kMethodChildSetVisible = "childWebviewSetVisible";
 constexpr auto kMethodChildPostMessage = "childWebviewPostMessage";
+constexpr auto kMethodChildSetFrameScript = "childWebviewSetFrameScript";
 constexpr auto kMethodChildDispose = "childWebviewDispose";
 // Pyokomin (ADR-0067): YouTube's real chat in a floating window (by id).
 constexpr auto kMethodFloatingChatOpen = "floatingChatOpen";
@@ -349,6 +350,18 @@ void WebviewWindowsPlugin::HandleMethodCall(
     return result->Success();
   }
 
+  if (method_call.method_name().compare(kMethodChildSetFrameScript) == 0) {
+    const auto map = std::get_if<flutter::EncodableMap>(method_call.arguments());
+    const auto id = map ? GetOptionalInt(*map, "id") : std::nullopt;
+    const auto script =
+        map ? GetOptionalValue<std::string>(*map, "script") : std::nullopt;
+    if (!id || !script || children_.find(*id) == children_.end()) {
+      return result->Error(kErrorCodeChildMissing);
+    }
+    children_.at(*id)->SetFrameScript(*script);
+    return result->Success();
+  }
+
   if (method_call.method_name().compare(kMethodChildDispose) == 0) {
     const auto map = std::get_if<flutter::EncodableMap>(method_call.arguments());
     const auto id = map ? GetOptionalInt(*map, "id") : std::nullopt;
@@ -611,6 +624,23 @@ ChildWebview::Listener WebviewWindowsPlugin::MakeChildListener() {
                    flutter::EncodableValue(message)},
               });
   };
+  listener.on_frame_message = [this, alive](int64_t id,
+                                            const std::string& source,
+                                            const std::string& message) {
+    if (!*alive) {
+      return;
+    }
+    SendEvent(kMethodChildEvent,
+              flutter::EncodableMap{
+                  {flutter::EncodableValue("id"), flutter::EncodableValue(id)},
+                  {flutter::EncodableValue("kind"),
+                   flutter::EncodableValue("frameMessage")},
+                  {flutter::EncodableValue("source"),
+                   flutter::EncodableValue(source)},
+                  {flutter::EncodableValue("message"),
+                   flutter::EncodableValue(message)},
+              });
+  };
   return listener;
 }
 
@@ -736,7 +766,8 @@ FloatingChat::Listener WebviewWindowsPlugin::MakeFloatingListener() {
                    flutter::EncodableValue("closed")},
               });
   };
-  listener.on_blocked = [this, alive](int64_t id, const std::string& what) {
+  listener.on_blocked = [this, alive](int64_t id, const std::string& what,
+                                      const std::string& origin) {
     if (!*alive) {
       return;
     }
@@ -747,6 +778,8 @@ FloatingChat::Listener WebviewWindowsPlugin::MakeFloatingListener() {
                    flutter::EncodableValue("blocked")},
                   {flutter::EncodableValue("what"),
                    flutter::EncodableValue(what)},
+                  {flutter::EncodableValue("origin"),
+                   flutter::EncodableValue(origin)},
               });
   };
   return listener;

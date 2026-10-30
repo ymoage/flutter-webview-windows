@@ -2,6 +2,9 @@
 
 #include <wrl.h>
 
+#include <algorithm>
+
+#include "child_chat_guard.h"
 #include "util/string_converter.h"
 
 using namespace Microsoft::WRL;
@@ -123,6 +126,23 @@ HRESULT ChildWebview::OnControllerCreated(HRESULT result,
           .Get(),
       &message_token_);
 
+  // The YouTube live chat iframes (instruction 444). Without ICoreWebView2_4
+  // (an old runtime) the frame script simply never runs.
+  if (auto webview4 = webview_.try_query<ICoreWebView2_4>()) {
+    webview4->add_FrameCreated(
+        Callback<ICoreWebView2FrameCreatedEventHandler>(
+            [this](ICoreWebView2* sender,
+                   ICoreWebView2FrameCreatedEventArgs* args) -> HRESULT {
+              wil::com_ptr<ICoreWebView2Frame> frame;
+              if (SUCCEEDED(args->get_Frame(frame.put())) && frame) {
+                OnFrameCreated(frame.get());
+              }
+              return S_OK;
+            })
+            .Get(),
+        &frame_created_token_);
+  }
+
   FitToParent();
   controller_->put_IsVisible(visible_ ? TRUE : FALSE);
   if (visible_) {
@@ -172,6 +192,121 @@ void ChildWebview::PostMessage(const std::string& message) {
   webview_->PostWebMessageAsString(util::Utf16FromUtf8(message).c_str());
 }
 
+void ChildWebview::SetFrameScript(const std::string& script) {
+  frame_script_ = util::Utf16FromUtf8(script);
+  if (closed_ || frame_script_.empty()) {
+    return;
+  }
+  for (const auto& frame : frames_) {
+    if (frame->loaded) {
+      RunFrameScript(*frame);
+    }
+  }
+}
+
+void ChildWebview::OnFrameCreated(ICoreWebView2Frame* created) {
+  if (closed_) {
+    return;
+  }
+  auto frame2 = wil::com_ptr<ICoreWebView2Frame>(created)
+                    .try_query<ICoreWebView2Frame2>();
+  if (!frame2) {
+    return;
+  }
+  auto entry = std::make_shared<Frame>();
+  entry->frame = frame2;
+  Frame* raw = entry.get();
+  // The handlers are removed in DetachFrame (on Destroyed and on Close), so
+  // [this] and [raw] are alive whenever they run.
+  frame2->add_NavigationStarting(
+      Callback<ICoreWebView2FrameNavigationStartingEventHandler>(
+          [raw](ICoreWebView2Frame* sender,
+                ICoreWebView2NavigationStartingEventArgs* args) -> HRESULT {
+            wil::unique_cotaskmem_string uri;
+            raw->url = SUCCEEDED(args->get_Uri(&uri)) && uri
+                           ? std::wstring(uri.get())
+                           : std::wstring();
+            raw->loaded = false;
+            return S_OK;
+          })
+          .Get(),
+      &entry->navigation_token);
+  frame2->add_DOMContentLoaded(
+      Callback<ICoreWebView2FrameDOMContentLoadedEventHandler>(
+          [this, raw](ICoreWebView2Frame* sender,
+                      ICoreWebView2DOMContentLoadedEventArgs* args)
+              -> HRESULT {
+            raw->loaded = true;
+            RunFrameScript(*raw);
+            return S_OK;
+          })
+          .Get(),
+      &entry->loaded_token);
+  frame2->add_WebMessageReceived(
+      Callback<ICoreWebView2FrameWebMessageReceivedEventHandler>(
+          [this](ICoreWebView2Frame* sender,
+                 ICoreWebView2WebMessageReceivedEventArgs* args) -> HRESULT {
+            wil::unique_cotaskmem_string source;
+            if (FAILED(args->get_Source(&source)) || !source ||
+                !IsAllowedChatUrl(std::wstring(source.get()))) {
+              return S_OK;
+            }
+            wil::unique_cotaskmem_string message;
+            if (FAILED(args->TryGetWebMessageAsString(&message)) || !message) {
+              return S_OK;
+            }
+            if (listener_.on_frame_message) {
+              listener_.on_frame_message(
+                  id_, util::Utf8FromUtf16(source.get()),
+                  util::Utf8FromUtf16(message.get()));
+            }
+            return S_OK;
+          })
+          .Get(),
+      &entry->message_token);
+  frame2->add_Destroyed(
+      Callback<ICoreWebView2FrameDestroyedEventHandler>(
+          [this, raw](ICoreWebView2Frame* sender, IUnknown* args) -> HRESULT {
+            RemoveFrame(raw);
+            return S_OK;
+          })
+          .Get(),
+      &entry->destroyed_token);
+  frames_.push_back(entry);
+}
+
+void ChildWebview::RunFrameScript(const Frame& frame) {
+  if (closed_ || frame_script_.empty() || !IsAllowedChatUrl(frame.url)) {
+    return;
+  }
+  frame.frame->ExecuteScript(frame_script_.c_str(), nullptr);
+}
+
+void ChildWebview::RemoveFrame(const Frame* frame) {
+  const auto it =
+      std::find_if(frames_.begin(), frames_.end(),
+                   [frame](const auto& entry) { return entry.get() == frame; });
+  if (it == frames_.end()) {
+    return;
+  }
+  // Keep the entry alive until its handlers are removed (we may be inside
+  // one of them).
+  const auto entry = *it;
+  frames_.erase(it);
+  DetachFrame(*entry);
+}
+
+void ChildWebview::DetachFrame(Frame& frame) {
+  if (!frame.frame) {
+    return;
+  }
+  frame.frame->remove_NavigationStarting(frame.navigation_token);
+  frame.frame->remove_DOMContentLoaded(frame.loaded_token);
+  frame.frame->remove_WebMessageReceived(frame.message_token);
+  frame.frame->remove_Destroyed(frame.destroyed_token);
+  frame.frame = nullptr;
+}
+
 void ChildWebview::OnParentSized() {
   if (!closed_) {
     FitToParent();
@@ -191,8 +326,15 @@ void ChildWebview::Close() {
   closed_ = true;
   const bool was_visible = visible_;
   visible_ = false;
+  for (const auto& frame : frames_) {
+    DetachFrame(*frame);
+  }
+  frames_.clear();
   if (webview_) {
     webview_->remove_WebMessageReceived(message_token_);
+    if (auto webview4 = webview_.try_query<ICoreWebView2_4>()) {
+      webview4->remove_FrameCreated(frame_created_token_);
+    }
     webview_ = nullptr;
   }
   if (controller_) {

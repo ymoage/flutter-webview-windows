@@ -25,6 +25,16 @@ class ChildWebviewMessage extends ChildWebviewEvent {
   final String message;
 }
 
+/// A web message from a YouTube live chat iframe of the page [id]
+/// (instruction 444; see [ChildWebview.setFrameScript]). [source] is the
+/// frame's URL.
+class ChildWebviewFrameMessage extends ChildWebviewEvent {
+  const ChildWebviewFrameMessage(this.id, this.source, this.message);
+  final int id;
+  final String source;
+  final String message;
+}
+
 /// The user closed the floating chat [id] (it is already disposed).
 class FloatingChatClosed extends ChildWebviewEvent {
   const FloatingChatClosed(this.id);
@@ -32,11 +42,13 @@ class FloatingChatClosed extends ChildWebviewEvent {
 }
 
 /// A navigation (`navigation`) or a new window (`newWindow`) of the floating
-/// chat [id] was cancelled. The URL is not passed on.
+/// chat [id] was cancelled. Only the [origin] of the target is passed on
+/// (up to the first '/' after "://"; empty when unknown), never its path.
 class FloatingChatBlocked extends ChildWebviewEvent {
-  const FloatingChatBlocked(this.id, this.what);
+  const FloatingChatBlocked(this.id, this.what, [this.origin = '']);
   final int id;
   final String what;
+  final String origin;
 }
 
 /// Pyokomin (ADR-0063, ADR-0067, #298): the app's page hosted in a real child
@@ -79,12 +91,19 @@ class ChildWebview {
         if (source is! String || message is! String) return null;
         return ChildWebviewMessage(id, source, message);
       }
+      if (kind == 'frameMessage') {
+        final source = arguments['source'];
+        final message = arguments['message'];
+        if (source is! String || message is! String) return null;
+        return ChildWebviewFrameMessage(id, source, message);
+      }
     } else if (method == 'floatingChatEvent') {
       if (kind == 'closed') return FloatingChatClosed(id);
       if (kind == 'blocked') {
         final what = arguments['what'];
         if (what is! String) return null;
-        return FloatingChatBlocked(id, what);
+        final origin = arguments['origin'];
+        return FloatingChatBlocked(id, what, origin is String ? origin : '');
       }
     }
     return null;
@@ -118,6 +137,15 @@ class ChildWebview {
   static Future<void> postMessage(int id, String message) =>
       _channel.invokeMethod<void>('childWebviewPostMessage',
           <String, Object>{'id': id, 'message': message});
+
+  /// Runs [script] in every YouTube live chat iframe of the page [id] when its
+  /// document has loaded, and at once in those already loaded (instruction
+  /// 444). What the iframe posts with `window.chrome.webview.postMessage`
+  /// arrives as [ChildWebviewFrameMessage]. An empty [script] stops it for
+  /// new documents.
+  static Future<void> setFrameScript(int id, String script) =>
+      _channel.invokeMethod<void>('childWebviewSetFrameScript',
+          <String, Object>{'id': id, 'script': script});
 
   /// Closes the child window [id]. Safe to call when there is none.
   static Future<void> dispose(int id) => _channel

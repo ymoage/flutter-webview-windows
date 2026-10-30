@@ -8,6 +8,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 // Pyokomin (ADR-0063, ADR-0067, #298): the app's page in a real child window
 // of the app window, with a plain ICoreWebView2Controller.
@@ -34,6 +35,11 @@ class ChildWebview : public std::enable_shared_from_this<ChildWebview> {
     std::function<void(int64_t id, const std::string& source,
                        const std::string& message)>
         on_message;
+    // A web message from a YouTube live chat iframe of the page
+    // (instruction 444), with the frame's source URL.
+    std::function<void(int64_t id, const std::string& source,
+                       const std::string& message)>
+        on_frame_message;
   };
 
   typedef std::function<void(bool ok, std::string error)> CreatedCallback;
@@ -63,6 +69,13 @@ class ChildWebview : public std::enable_shared_from_this<ChildWebview> {
   // Dropped while the webview is not created yet.
   void PostMessage(const std::string& message);
 
+  // Pyokomin (instruction 444): a script run in every YouTube live chat
+  // iframe of the page (IsAllowedChatUrl) when its document has loaded, and
+  // at once in those already loaded. Messages the iframe posts with
+  // window.chrome.webview.postMessage come back through on_frame_message.
+  // An empty script stops running it in new documents.
+  void SetFrameScript(const std::string& script);
+
   // WM_SIZE / WM_MOVE of the top-level window.
   void OnParentSized();
   void OnParentMoved();
@@ -86,6 +99,20 @@ class ChildWebview : public std::enable_shared_from_this<ChildWebview> {
   // Only messages from this origin are accepted ("https://<host>/").
   std::wstring allowed_origin_;
 
+  // The iframes of the page (instruction 444).
+  struct Frame {
+    wil::com_ptr<ICoreWebView2Frame2> frame;
+    std::wstring url;
+    bool loaded = false;
+    EventRegistrationToken navigation_token = {};
+    EventRegistrationToken loaded_token = {};
+    EventRegistrationToken message_token = {};
+    EventRegistrationToken destroyed_token = {};
+  };
+  std::vector<std::shared_ptr<Frame>> frames_;
+  std::wstring frame_script_;
+  EventRegistrationToken frame_created_token_ = {};
+
   HRESULT OnControllerCreated(HRESULT result,
                               ICoreWebView2Controller* controller,
                               const std::wstring& whost,
@@ -94,4 +121,8 @@ class ChildWebview : public std::enable_shared_from_this<ChildWebview> {
                               CreatedCallback callback);
   void FitToParent();
   void OnWebMessage(ICoreWebView2WebMessageReceivedEventArgs* args);
+  void OnFrameCreated(ICoreWebView2Frame* frame);
+  void RunFrameScript(const Frame& frame);
+  void RemoveFrame(const Frame* frame);
+  static void DetachFrame(Frame& frame);
 };

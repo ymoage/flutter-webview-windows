@@ -114,7 +114,11 @@ HRESULT FloatingChat::OnControllerCreated(HRESULT result,
             // Handled without a new window: nothing opens.
             args->put_Handled(TRUE);
             if (listener_.on_blocked) {
-              listener_.on_blocked(id_, "newWindow");
+              wil::unique_cotaskmem_string uri;
+              const std::wstring target =
+                  SUCCEEDED(args->get_Uri(&uri)) && uri ? uri.get() : L"";
+              listener_.on_blocked(id_, "newWindow",
+                                   util::Utf8FromUtf16(OriginOf(target)));
             }
             return S_OK;
           })
@@ -238,12 +242,15 @@ void FloatingChat::FocusWebview() {
 void FloatingChat::OnNavigationStarting(
     ICoreWebView2NavigationStartingEventArgs* args) {
   wil::unique_cotaskmem_string uri;
-  if (SUCCEEDED(args->get_Uri(&uri)) && uri &&
-      IsAllowedChatUrl(std::wstring(uri.get()))) {
+  const std::wstring target = SUCCEEDED(args->get_Uri(&uri)) && uri
+                                  ? std::wstring(uri.get())
+                                  : std::wstring();
+  if (IsAllowedChatUrl(target)) {
     return;
   }
   args->put_Cancel(TRUE);
   if (listener_.on_blocked) {
-    listener_.on_blocked(id_, "navigation");
+    listener_.on_blocked(id_, "navigation",
+                         util::Utf8FromUtf16(OriginOf(target)));
   }
 }

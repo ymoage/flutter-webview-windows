@@ -20,3 +20,16 @@ inline bool IsAllowedChatUrl(const std::wstring& url) {
   }
   return false;
 }
+
+// Pyokomin (instruction 444): the origin of [url] for the records, that is,
+// everything up to the first '/' after "://" (no path, no query, no
+// fragment). Empty when [url] has no "://".
+inline std::wstring OriginOf(const std::wstring& url) {
+  const auto scheme_end = url.find(L"://");
+  if (scheme_end == std::wstring::npos) {
+    return L"";
+  }
+  const auto host_start = scheme_end + 3;
+  const auto host_end = url.find_first_of(L"/?#", host_start);
+  return url.substr(0, host_end == std::wstring::npos ? url.size() : host_end);
+}

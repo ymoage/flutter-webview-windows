@@ -32,6 +32,17 @@ int main() {
          "http -> refused");
   Expect(!IsAllowedChatUrl(L""), "empty -> refused");
 
+  Expect(OriginOf(L"https://pay.google.com/gp/p/ui/pay?x=1") ==
+             L"https://pay.google.com",
+         "OriginOf drops the path and the query");
+  Expect(OriginOf(L"https://www.youtube.com") == L"https://www.youtube.com",
+         "OriginOf without a path");
+  Expect(OriginOf(L"https://a.example?q=1") == L"https://a.example",
+         "OriginOf stops at the query");
+  Expect(OriginOf(L"https://a.example#f") == L"https://a.example",
+         "OriginOf stops at the fragment");
+  Expect(OriginOf(L"about:blank").empty(), "OriginOf without :// -> empty");
+
   std::printf("%d failure(s)\n", failures);
   return failures == 0 ? 0 : 1;
 }

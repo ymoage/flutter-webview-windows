@@ -30,8 +30,12 @@ class FloatingChat : public std::enable_shared_from_this<FloatingChat> {
     // The user closed the window (the close button). The owner disposes it.
     std::function<void(int64_t id)> on_closed;
     // A navigation ("navigation") or a new window ("newWindow") was
-    // cancelled. The URL is not passed on.
-    std::function<void(int64_t id, const std::string& what)> on_blocked;
+    // cancelled. Only the origin of the target is passed on (OriginOf: up
+    // to the first '/' after "://"; instruction 444), never the path or the
+    // query.
+    std::function<void(int64_t id, const std::string& what,
+                       const std::string& origin)>
+        on_blocked;
   };
 
   typedef std::function<void(bool ok, std::string error)> CreatedCallback;
