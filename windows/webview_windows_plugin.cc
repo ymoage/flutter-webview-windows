@@ -699,15 +699,24 @@ void WebviewWindowsPlugin::OpenFloatingChat(
       return shared_result->Error(kErrorCodeEnvironmentCreationFailed, error);
     }
     c->Create(webview_host_->environment(), url,
-              [alive, shared_result](bool ok, std::string message) {
+              [this, alive, shared_result, weak_chat, id](bool ok,
+                                                          std::string message) {
                 if (!*alive) {
                   return;
                 }
                 if (ok) {
                   shared_result->Success();
-                } else {
-                  shared_result->Error(kErrorCodeFloatingChatFailed, message);
+                  return;
                 }
+                // The window is shown before the controller exists; do not
+                // leave it empty (opening again would only bring it to the
+                // front). Only if it is still the one that was asked for.
+                const auto it = floating_.find(id);
+                const auto failed = weak_chat.lock();
+                if (failed && it != floating_.end() && it->second == failed) {
+                  CloseFloatingChat(id);
+                }
+                shared_result->Error(kErrorCodeFloatingChatFailed, message);
               });
   });
 }
