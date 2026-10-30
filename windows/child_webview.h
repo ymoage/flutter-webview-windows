@@ -40,6 +40,13 @@ class ChildWebview : public std::enable_shared_from_this<ChildWebview> {
     std::function<void(int64_t id, const std::string& source,
                        const std::string& message)>
         on_frame_message;
+    // A top-level navigation or a new window of the page went outside its
+    // own origin and was cancelled (instruction 445). [external] tells
+    // whether it was handed to the default browser (http and https only).
+    // Only the origin of the target is passed on (OriginOf).
+    std::function<void(int64_t id, const std::string& what,
+                       const std::string& origin, bool external)>
+        on_navigation_blocked;
   };
 
   typedef std::function<void(bool ok, std::string error)> CreatedCallback;
@@ -69,6 +76,10 @@ class ChildWebview : public std::enable_shared_from_this<ChildWebview> {
   // Dropped while the webview is not created yet.
   void PostMessage(const std::string& message);
 
+  // Sends JSON to the page (the "message" event gets the parsed value;
+  // design-web-ui 6). Dropped while the webview is not created yet.
+  void PostJson(const std::string& json);
+
   // Pyokomin (instruction 444): a script run in every YouTube live chat
   // iframe of the page (IsAllowedChatUrl) when its document has loaded, and
   // at once in those already loaded. Messages the iframe posts with
@@ -94,6 +105,8 @@ class ChildWebview : public std::enable_shared_from_this<ChildWebview> {
   wil::com_ptr<ICoreWebView2Controller> controller_;
   wil::com_ptr<ICoreWebView2> webview_;
   EventRegistrationToken message_token_ = {};
+  EventRegistrationToken navigation_token_ = {};
+  EventRegistrationToken new_window_token_ = {};
   bool visible_ = false;
   bool closed_ = false;
   // Only messages from this origin are accepted ("https://<host>/").
@@ -121,6 +134,10 @@ class ChildWebview : public std::enable_shared_from_this<ChildWebview> {
                               CreatedCallback callback);
   void FitToParent();
   void OnWebMessage(ICoreWebView2WebMessageReceivedEventArgs* args);
+  // Cancels a top-level navigation or a new window outside the page's
+  // origin and hands web links to the default browser.
+  void LeavePage(const std::wstring& target, const char* what, bool cancel,
+                 ICoreWebView2NavigationStartingEventArgs* navigation);
   void OnFrameCreated(ICoreWebView2Frame* frame);
   void RunFrameScript(const Frame& frame);
   void RemoveFrame(const Frame* frame);

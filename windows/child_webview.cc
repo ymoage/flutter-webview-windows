@@ -1,10 +1,12 @@
 #include "child_webview.h"
 
+#include <shellapi.h>
 #include <wrl.h>
 
 #include <algorithm>
 
 #include "child_chat_guard.h"
+#include "child_navigation_guard.h"
 #include "util/string_converter.h"
 
 using namespace Microsoft::WRL;
@@ -126,6 +128,40 @@ HRESULT ChildWebview::OnControllerCreated(HRESULT result,
           .Get(),
       &message_token_);
 
+  // The page stays on its own origin (instruction 445). Iframe navigations
+  // are not top-level and do not come here.
+  webview_->add_NavigationStarting(
+      Callback<ICoreWebView2NavigationStartingEventHandler>(
+          [this](ICoreWebView2* sender,
+                 ICoreWebView2NavigationStartingEventArgs* args) -> HRESULT {
+            wil::unique_cotaskmem_string uri;
+            const std::wstring target = SUCCEEDED(args->get_Uri(&uri)) && uri
+                                            ? std::wstring(uri.get())
+                                            : std::wstring();
+            if (DecideTopNavigation(target, allowed_origin_) !=
+                TopNavigation::kAllow) {
+              LeavePage(target, "navigation", true, args);
+            }
+            return S_OK;
+          })
+          .Get(),
+      &navigation_token_);
+  webview_->add_NewWindowRequested(
+      Callback<ICoreWebView2NewWindowRequestedEventHandler>(
+          [this](ICoreWebView2* sender,
+                 ICoreWebView2NewWindowRequestedEventArgs* args) -> HRESULT {
+            // Handled without a new window: nothing opens in the app.
+            args->put_Handled(TRUE);
+            wil::unique_cotaskmem_string uri;
+            const std::wstring target = SUCCEEDED(args->get_Uri(&uri)) && uri
+                                            ? std::wstring(uri.get())
+                                            : std::wstring();
+            LeavePage(target, "newWindow", false, nullptr);
+            return S_OK;
+          })
+          .Get(),
+      &new_window_token_);
+
   // The YouTube live chat iframes (instruction 444). Without ICoreWebView2_4
   // (an old runtime) the frame script simply never runs.
   if (auto webview4 = webview_.try_query<ICoreWebView2_4>()) {
@@ -190,6 +226,31 @@ void ChildWebview::PostMessage(const std::string& message) {
     return;
   }
   webview_->PostWebMessageAsString(util::Utf16FromUtf8(message).c_str());
+}
+
+void ChildWebview::PostJson(const std::string& json) {
+  if (closed_ || !webview_) {
+    return;
+  }
+  webview_->PostWebMessageAsJson(util::Utf16FromUtf8(json).c_str());
+}
+
+void ChildWebview::LeavePage(const std::wstring& target, const char* what,
+                             bool cancel,
+                             ICoreWebView2NavigationStartingEventArgs* navigation) {
+  if (cancel && navigation) {
+    navigation->put_Cancel(TRUE);
+  }
+  const bool external = IsWebUrl(target);
+  if (external) {
+    ShellExecuteW(nullptr, L"open", target.c_str(), nullptr, nullptr,
+                  SW_SHOWNORMAL);
+  }
+  if (listener_.on_navigation_blocked) {
+    listener_.on_navigation_blocked(id_, what,
+                                    util::Utf8FromUtf16(OriginOf(target)),
+                                    external);
+  }
 }
 
 void ChildWebview::SetFrameScript(const std::string& script) {
@@ -332,6 +393,8 @@ void ChildWebview::Close() {
   frames_.clear();
   if (webview_) {
     webview_->remove_WebMessageReceived(message_token_);
+    webview_->remove_NavigationStarting(navigation_token_);
+    webview_->remove_NewWindowRequested(new_window_token_);
     if (auto webview4 = webview_.try_query<ICoreWebView2_4>()) {
       webview4->remove_FrameCreated(frame_created_token_);
     }

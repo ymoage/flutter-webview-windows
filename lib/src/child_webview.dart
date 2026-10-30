@@ -35,6 +35,19 @@ class ChildWebviewFrameMessage extends ChildWebviewEvent {
   final String message;
 }
 
+/// A top-level navigation (`navigation`) or a new window (`newWindow`) of the
+/// page [id] went outside its own origin and was cancelled (instruction
+/// 445). [external] tells whether it was handed to the default browser
+/// (http and https only). Only the [origin] of the target is passed on.
+class ChildWebviewNavigationBlocked extends ChildWebviewEvent {
+  const ChildWebviewNavigationBlocked(
+      this.id, this.what, this.origin, this.external);
+  final int id;
+  final String what;
+  final String origin;
+  final bool external;
+}
+
 /// The user closed the floating chat [id] (it is already disposed).
 class FloatingChatClosed extends ChildWebviewEvent {
   const FloatingChatClosed(this.id);
@@ -97,6 +110,14 @@ class ChildWebview {
         if (source is! String || message is! String) return null;
         return ChildWebviewFrameMessage(id, source, message);
       }
+      if (kind == 'navigationBlocked') {
+        final what = arguments['what'];
+        final origin = arguments['origin'];
+        final external = arguments['external'];
+        if (what is! String) return null;
+        return ChildWebviewNavigationBlocked(id, what,
+            origin is String ? origin : '', external == true);
+      }
     } else if (method == 'floatingChatEvent') {
       if (kind == 'closed') return FloatingChatClosed(id);
       if (kind == 'blocked') {
@@ -137,6 +158,11 @@ class ChildWebview {
   static Future<void> postMessage(int id, String message) =>
       _channel.invokeMethod<void>('childWebviewPostMessage',
           <String, Object>{'id': id, 'message': message});
+
+  /// Sends [json] (a JSON text) to the page [id]; its `message` event gets
+  /// the parsed value (design-web-ui 6).
+  static Future<void> postJson(int id, String json) => _channel.invokeMethod<
+      void>('childWebviewPostJson', <String, Object>{'id': id, 'json': json});
 
   /// Runs [script] in every YouTube live chat iframe of the page [id] when its
   /// document has loaded, and at once in those already loaded (instruction

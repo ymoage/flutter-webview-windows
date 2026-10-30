@@ -36,6 +36,7 @@ constexpr auto kMethodChildCreate = "childWebviewCreate";
 constexpr auto kMethodChildSetVisible = "childWebviewSetVisible";
 constexpr auto kMethodChildPostMessage = "childWebviewPostMessage";
 constexpr auto kMethodChildSetFrameScript = "childWebviewSetFrameScript";
+constexpr auto kMethodChildPostJson = "childWebviewPostJson";
 constexpr auto kMethodChildDispose = "childWebviewDispose";
 // Pyokomin (ADR-0067): YouTube's real chat in a floating window (by id).
 constexpr auto kMethodFloatingChatOpen = "floatingChatOpen";
@@ -350,6 +351,18 @@ void WebviewWindowsPlugin::HandleMethodCall(
     return result->Success();
   }
 
+  if (method_call.method_name().compare(kMethodChildPostJson) == 0) {
+    const auto map = std::get_if<flutter::EncodableMap>(method_call.arguments());
+    const auto id = map ? GetOptionalInt(*map, "id") : std::nullopt;
+    const auto json =
+        map ? GetOptionalValue<std::string>(*map, "json") : std::nullopt;
+    if (!id || !json || children_.find(*id) == children_.end()) {
+      return result->Error(kErrorCodeChildMissing);
+    }
+    children_.at(*id)->PostJson(*json);
+    return result->Success();
+  }
+
   if (method_call.method_name().compare(kMethodChildSetFrameScript) == 0) {
     const auto map = std::get_if<flutter::EncodableMap>(method_call.arguments());
     const auto id = map ? GetOptionalInt(*map, "id") : std::nullopt;
@@ -639,6 +652,26 @@ ChildWebview::Listener WebviewWindowsPlugin::MakeChildListener() {
                    flutter::EncodableValue(source)},
                   {flutter::EncodableValue("message"),
                    flutter::EncodableValue(message)},
+              });
+  };
+  listener.on_navigation_blocked = [this, alive](int64_t id,
+                                                 const std::string& what,
+                                                 const std::string& origin,
+                                                 bool external) {
+    if (!*alive) {
+      return;
+    }
+    SendEvent(kMethodChildEvent,
+              flutter::EncodableMap{
+                  {flutter::EncodableValue("id"), flutter::EncodableValue(id)},
+                  {flutter::EncodableValue("kind"),
+                   flutter::EncodableValue("navigationBlocked")},
+                  {flutter::EncodableValue("what"),
+                   flutter::EncodableValue(what)},
+                  {flutter::EncodableValue("origin"),
+                   flutter::EncodableValue(origin)},
+                  {flutter::EncodableValue("external"),
+                   flutter::EncodableValue(external)},
               });
   };
   return listener;
