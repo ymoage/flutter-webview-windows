@@ -173,14 +173,41 @@ class ChildWebview {
       _channel.invokeMethod<void>('childWebviewSetFrameScript',
           <String, Object>{'id': id, 'script': script});
 
+  /// Pyokomin (instruction 454 B, a developer trial): marks the page [id]
+  /// (only that page) as activated by the user for autoplay, by running the
+  /// fixed expression `0` with DevTools `Runtime.evaluate` `userGesture`.
+  /// Nothing on the page is clicked. Returns whether the call succeeded.
+  static Future<bool> grantUserGesture(int id) async =>
+      await _channel.invokeMethod<bool>(
+          'childWebviewGrantUserGesture', <String, Object>{'id': id}) ??
+      false;
+
+  /// Pyokomin (instruction 454 B): of the texture webviews (receiving,
+  /// sending, replay; not the page child windows), how many play audio.
+  static Future<ChildWebviewAudio> playingAudioCount() async {
+    final map = await _channel
+        .invokeMapMethod<String, Object?>('webviewsPlayingAudioCount');
+    return ChildWebviewAudio(
+        (map?['playing'] as int?) ?? 0, (map?['total'] as int?) ?? 0);
+  }
+
   /// Closes the child window [id]. Safe to call when there is none.
   static Future<void> dispose(int id) => _channel
       .invokeMethod<void>('childWebviewDispose', <String, Object>{'id': id});
 }
 
-/// Pyokomin (ADR-0067, #298): YouTube's real chat in a floating window (an
-/// unowned top-level window with its own taskbar button), addressed by an id
-/// per stream.
+/// How many of the texture webviews play audio (instruction 454 B).
+class ChildWebviewAudio {
+  const ChildWebviewAudio(this.playing, this.total);
+
+  final int playing;
+  final int total;
+}
+
+/// Pyokomin (ADR-0067, #298): YouTube's real chat in a floating window,
+/// addressed by an id per stream. It is owned by the app window (instruction
+/// 454): it stays in front of the app and is hidden with it, but it is
+/// neither modal nor topmost.
 ///
 /// The chat area of the app embeds live_chat with `embed_domain`, where
 /// YouTube leaves out delete and the other moderation items; this window

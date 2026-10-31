@@ -39,17 +39,30 @@ FloatingChat::FloatingChat(int64_t id, Listener listener)
 FloatingChat::~FloatingChat() { Close(); }
 
 void FloatingChat::Create(ICoreWebView2Environment* environment,
-                          const std::string& url, CreatedCallback callback) {
+                          HWND owner, const std::string& url,
+                          CreatedCallback callback) {
+  if (!owner) {
+    // Without the owner it would be a free window again and go behind the
+    // app (instruction 454): refuse instead of silently opening that.
+    callback(false, "The app window was not found.");
+    return;
+  }
   EnsureWindowClass(&FloatingChat::WindowProc);
   // Sized for the system dpi; WM_DPICHANGED fixes it on another monitor.
   const UINT dpi = GetDpiForSystem();
+  // Owned by the app window: always in front of it, hidden with it when it
+  // is minimized. Not modal (the owner is never disabled) and not topmost.
   window_ = CreateWindowEx(
       0, kWindowClassName, kWindowTitle, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
       CW_USEDEFAULT, MulDiv(kDefaultWidthDip, dpi, 96),
-      MulDiv(kDefaultHeightDip, dpi, 96), nullptr, nullptr,
+      MulDiv(kDefaultHeightDip, dpi, 96), owner, nullptr,
       GetModuleHandle(nullptr), nullptr);
   if (!window_) {
     callback(false, "Creating the window failed.");
+    return;
+  }
+  if (GetWindow(window_, GW_OWNER) != owner) {
+    callback(false, "The window has no owner.");
     return;
   }
   SetWindowLongPtr(window_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
@@ -208,6 +221,17 @@ LRESULT FloatingChat::HandleMessage(UINT message, WPARAM wparam,
                    suggested->bottom - suggested->top,
                    SWP_NOZORDER | SWP_NOACTIVATE);
       return 0;
+    }
+    case WM_NCDESTROY: {
+      // Windows destroys an owned window before its owner. Close() detaches
+      // the window before its own DestroyWindow, so this only runs when the
+      // owner went first: the window is gone, clean up the rest once.
+      auto keep_alive = shared_from_this();
+      const HWND destroyed = window_;
+      SetWindowLongPtr(destroyed, GWLP_USERDATA, 0);
+      window_ = nullptr;
+      Close();
+      return DefWindowProc(destroyed, message, wparam, lparam);
     }
     case WM_CLOSE: {
       // The owner disposes it (and so the window). Keep the default

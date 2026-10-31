@@ -209,6 +209,9 @@ class Webview {
   bool Resume();
   bool SetMuted(bool muted);
 
+  // Pyokomin (instruction 454 B): whether the document is playing audio.
+  bool IsPlayingAudio();
+
   bool SetVirtualHostNameMapping(const std::string& hostName,
                                  const std::string& path,
                                  WebviewHostResourceAccessKind accessKind);

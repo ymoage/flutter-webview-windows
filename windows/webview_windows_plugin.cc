@@ -38,6 +38,9 @@ constexpr auto kMethodChildPostMessage = "childWebviewPostMessage";
 constexpr auto kMethodChildSetFrameScript = "childWebviewSetFrameScript";
 constexpr auto kMethodChildPostJson = "childWebviewPostJson";
 constexpr auto kMethodChildDispose = "childWebviewDispose";
+// Pyokomin (instruction 454 B, a developer trial).
+constexpr auto kMethodChildGrantUserGesture = "childWebviewGrantUserGesture";
+constexpr auto kMethodPlayingAudioCount = "webviewsPlayingAudioCount";
 // Pyokomin (ADR-0067): YouTube's real chat in a floating window (by id).
 constexpr auto kMethodFloatingChatOpen = "floatingChatOpen";
 constexpr auto kMethodFloatingChatClose = "floatingChatClose";
@@ -373,6 +376,40 @@ void WebviewWindowsPlugin::HandleMethodCall(
     }
     children_.at(*id)->SetFrameScript(*script);
     return result->Success();
+  }
+
+  if (method_call.method_name().compare(kMethodChildGrantUserGesture) == 0) {
+    const auto map = std::get_if<flutter::EncodableMap>(method_call.arguments());
+    const auto id = map ? GetOptionalInt(*map, "id") : std::nullopt;
+    if (!id || children_.find(*id) == children_.end()) {
+      return result->Error(kErrorCodeChildMissing);
+    }
+    std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>
+        shared_result = std::move(result);
+    auto alive = alive_;
+    // Only the page child window [id]; the other webviews are not touched.
+    children_.at(*id)->GrantUserGesture([alive, shared_result](bool ok) {
+      if (*alive) {
+        shared_result->Success(flutter::EncodableValue(ok));
+      }
+    });
+    return;
+  }
+
+  if (method_call.method_name().compare(kMethodPlayingAudioCount) == 0) {
+    // The texture webviews (receiving, sending, replay; not the page child
+    // windows): how many play audio, and how many there are.
+    int64_t playing = 0;
+    for (const auto& [texture_id, bridge] : instances_) {
+      if (bridge->webview() && bridge->webview()->IsPlayingAudio()) {
+        ++playing;
+      }
+    }
+    return result->Success(flutter::EncodableValue(flutter::EncodableMap{
+        {flutter::EncodableValue("playing"), flutter::EncodableValue(playing)},
+        {flutter::EncodableValue("total"),
+         flutter::EncodableValue(static_cast<int64_t>(instances_.size()))},
+    }));
   }
 
   if (method_call.method_name().compare(kMethodChildDispose) == 0) {
@@ -761,7 +798,13 @@ void WebviewWindowsPlugin::OpenFloatingChat(
     if (!success) {
       return shared_result->Error(kErrorCodeEnvironmentCreationFailed, error);
     }
-    c->Create(webview_host_->environment(), url,
+    // Owned by the app's top-level window (instruction 454), found the same
+    // way as for the child window.
+    const auto view = registrar_->GetView();
+    const HWND flutter_view = view ? view->GetNativeWindow() : nullptr;
+    const HWND owner =
+        flutter_view ? GetAncestor(flutter_view, GA_ROOT) : nullptr;
+    c->Create(webview_host_->environment(), owner, url,
               [this, alive, shared_result, weak_chat, id](bool ok,
                                                           std::string message) {
                 if (!*alive) {

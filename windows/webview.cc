@@ -1034,6 +1034,17 @@ bool Webview::Resume() {
          webview_controller_->put_IsVisible(true) == S_OK;
 }
 
+bool Webview::IsPlayingAudio() {
+  if (!IsValid()) {
+    return false;
+  }
+  wil::com_ptr<ICoreWebView2_8> webview8;
+  BOOL playing = FALSE;
+  return SUCCEEDED(webview_.try_query_to(&webview8)) && webview8 &&
+         SUCCEEDED(webview8->get_IsDocumentPlayingAudio(&playing)) &&
+         playing;
+}
+
 bool Webview::SetMuted(bool muted) {
   std::cerr << "[WebView2] SetMuted(" << (muted ? "true" : "false") << ") called" << std::endl;
   if (!IsValid()) {

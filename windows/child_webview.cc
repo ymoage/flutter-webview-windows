@@ -246,6 +246,25 @@ void ChildWebview::PostJson(const std::string& json) {
   webview_->PostWebMessageAsJson(util::Utf16FromUtf8(json).c_str());
 }
 
+void ChildWebview::GrantUserGesture(std::function<void(bool ok)> done) {
+  if (closed_ || !webview_) {
+    done(false);
+    return;
+  }
+  // The expression is fixed; nothing from Dart or the page goes into it.
+  const HRESULT hr = webview_->CallDevToolsProtocolMethod(
+      L"Runtime.evaluate", L"{\"expression\":\"0\",\"userGesture\":true}",
+      Callback<ICoreWebView2CallDevToolsProtocolMethodCompletedHandler>(
+          [done](HRESULT error, LPCWSTR) -> HRESULT {
+            done(SUCCEEDED(error));
+            return S_OK;
+          })
+          .Get());
+  if (FAILED(hr)) {
+    done(false);
+  }
+}
+
 void ChildWebview::LeavePage(const std::wstring& target, const char* what,
                              bool external,
                              ICoreWebView2NavigationStartingEventArgs* navigation) {

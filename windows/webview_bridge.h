@@ -34,6 +34,8 @@ class WebviewBridge {
 
   TextureBridge* texture_bridge() const { return texture_bridge_.get(); }
 
+  Webview* webview() const { return webview_.get(); }
+
   int64_t texture_id() const { return texture_id_; }
 
  private:

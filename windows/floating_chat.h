@@ -13,9 +13,11 @@
 //
 // The chat area of the app embeds live_chat in an iframe with embed_domain,
 // where YouTube leaves out the moderation items (delete, ...). This window
-// opens live_chat directly, so the user can delete there. It is an unowned
-// top-level window (it has its own taskbar button); where it goes, and
-// whether it stays open, is up to the user. The app only opens it, brings it
+// opens live_chat directly, so the user can delete there. It is owned by the
+// app window (instruction 454): it stays in front of the app, is hidden with
+// it when minimized and has no taskbar button of its own. It is neither
+// modal (the app stays usable) nor topmost. Where it goes, and whether it
+// stays open, is up to the user. The app only opens it, brings it
 // to the front, guards it and closes it when the app ends.
 //
 // Guards: it may only navigate inside live_chat (IsAllowedChatUrl), opens no
@@ -48,8 +50,9 @@ class FloatingChat : public std::enable_shared_from_this<FloatingChat> {
 
   // Creates the window and the controller and opens [url] (checked by the
   // owner with IsAllowedChatUrl). [callback] is called once.
-  void Create(ICoreWebView2Environment* environment, const std::string& url,
-              CreatedCallback callback);
+  // [owner] is the app's top-level window; without it the creation fails.
+  void Create(ICoreWebView2Environment* environment, HWND owner,
+              const std::string& url, CreatedCallback callback);
 
   // Restores it if minimized and brings it to the front.
   void BringToFront();

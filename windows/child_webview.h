@@ -87,6 +87,13 @@ class ChildWebview : public std::enable_shared_from_this<ChildWebview> {
   // An empty script stops running it in new documents.
   void SetFrameScript(const std::string& script);
 
+  // Pyokomin (instruction 454 B, a developer trial): runs the fixed
+  // expression "0" in this page only, marked as started by the user
+  // (DevTools Runtime.evaluate userGesture), so that the page counts as
+  // activated for autoplay. Nothing on the page is clicked. [done] gets
+  // whether the call succeeded.
+  void GrantUserGesture(std::function<void(bool ok)> done);
+
   // WM_SIZE / WM_MOVE of the top-level window.
   void OnParentSized();
   void OnParentMoved();
